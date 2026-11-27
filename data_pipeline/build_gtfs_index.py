@@ -18,6 +18,15 @@ def parse_time(value: str) -> int | None:
         return None
 
 
+def parse_gtfs_flag(value: str) -> int:
+    # Missing or invalid GTFS accessibility data is unknown, never affirmative.
+    try:
+        flag = int(value or 0)
+        return flag if flag in (0, 1, 2) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def rows(zf: zipfile.ZipFile, filename: str):
     with zf.open(filename) as raw:
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding='utf-8-sig', newline=''))
@@ -51,26 +60,46 @@ def build(archive: Path, destination: Path):
         PRAGMA synchronous=OFF;
         PRAGMA temp_store=MEMORY;
         CREATE TABLE routes(route_id TEXT PRIMARY KEY, agency_id TEXT, short_name TEXT, long_name TEXT, description TEXT, route_type INTEGER);
-        CREATE TABLE stops(stop_id TEXT PRIMARY KEY, code TEXT, name TEXT, lat REAL, lon REAL);
-        CREATE TABLE trips(trip_id TEXT PRIMARY KEY, route_id TEXT, service_id TEXT, headsign TEXT, direction_id TEXT, shape_id TEXT);
+        CREATE TABLE stops(stop_id TEXT PRIMARY KEY, code TEXT, name TEXT, lat REAL, lon REAL, location_type INTEGER NOT NULL DEFAULT 0, parent_station TEXT, wheelchair_boarding INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE trips(trip_id TEXT PRIMARY KEY, route_id TEXT, service_id TEXT, headsign TEXT, direction_id TEXT, shape_id TEXT, wheelchair_accessible INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE stop_times(trip_id TEXT, stop_sequence INTEGER, stop_id TEXT, arrival_sec INTEGER, departure_sec INTEGER, PRIMARY KEY(trip_id,stop_sequence));
         CREATE TABLE shapes(shape_id TEXT, point_sequence INTEGER, lat REAL, lon REAL, PRIMARY KEY(shape_id,point_sequence));
         CREATE TABLE calendar(service_id TEXT PRIMARY KEY, monday INTEGER,tuesday INTEGER,wednesday INTEGER,thursday INTEGER,friday INTEGER,saturday INTEGER,sunday INTEGER,start_date TEXT,end_date TEXT);
         CREATE TABLE feed_info(key TEXT PRIMARY KEY,value TEXT);
+        CREATE TABLE pathways(pathway_id TEXT PRIMARY KEY,from_stop_id TEXT,to_stop_id TEXT,pathway_mode INTEGER,is_bidirectional INTEGER,length REAL,traversal_time REAL,stair_count INTEGER,max_slope REAL,min_width REAL,signposted_as TEXT,reversed_signposted_as TEXT);
+        CREATE TABLE levels(level_id TEXT PRIMARY KEY,level_index REAL,level_name TEXT);
+        CREATE TABLE transfers(from_stop_id TEXT,to_stop_id TEXT,transfer_type INTEGER,min_transfer_time INTEGER,from_route_id TEXT,to_route_id TEXT,from_trip_id TEXT,to_trip_id TEXT);
     ''')
     with zipfile.ZipFile(archive) as zf:
         names = set(zf.namelist())
         insert_table(con, zf, 'routes.txt', 'INSERT INTO routes VALUES(?,?,?,?,?,?)', lambda r: (
             r.get('route_id'), r.get('agency_id',''), r.get('route_short_name',''), r.get('route_long_name',''), r.get('route_desc',''), int(r.get('route_type') or 3)))
-        insert_table(con, zf, 'stops.txt', 'INSERT INTO stops VALUES(?,?,?,?,?)', lambda r: (
-            r.get('stop_id'), r.get('stop_code',''), r.get('stop_name',''), float(r['stop_lat']) if r.get('stop_lat') else None, float(r['stop_lon']) if r.get('stop_lon') else None))
-        insert_table(con, zf, 'trips.txt', 'INSERT INTO trips VALUES(?,?,?,?,?,?)', lambda r: (
-            r.get('trip_id'), r.get('route_id'), r.get('service_id',''), r.get('trip_headsign',''), r.get('direction_id',''), r.get('shape_id','')))
+        insert_table(con, zf, 'stops.txt', 'INSERT INTO stops VALUES(?,?,?,?,?,?,?,?)', lambda r: (
+            r.get('stop_id'), r.get('stop_code',''), r.get('stop_name',''), float(r['stop_lat']) if r.get('stop_lat') else None, float(r['stop_lon']) if r.get('stop_lon') else None, int(r.get('location_type') or 0), r.get('parent_station',''), parse_gtfs_flag(r.get('wheelchair_boarding'))))
+        insert_table(con, zf, 'trips.txt', 'INSERT INTO trips VALUES(?,?,?,?,?,?,?)', lambda r: (
+            r.get('trip_id'), r.get('route_id'), r.get('service_id',''), r.get('trip_headsign',''), r.get('direction_id',''), r.get('shape_id',''), parse_gtfs_flag(r.get('wheelchair_accessible'))))
         insert_table(con, zf, 'calendar.txt', 'INSERT INTO calendar VALUES(?,?,?,?,?,?,?,?,?,?)', lambda r: (
             r.get('service_id'), *(int(r.get(day) or 0) for day in ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')), r.get('start_date',''), r.get('end_date','')))
         if 'feed_info.txt' in names:
             for row in rows(zf, 'feed_info.txt'):
                 con.execute('INSERT OR REPLACE INTO feed_info VALUES(?,?)', (row.get('feed_version','version'), row.get('feed_publisher_name','')))
+        if 'pathways.txt' in names:
+            insert_table(con, zf, 'pathways.txt', 'INSERT INTO pathways VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', lambda r: (
+                r.get('pathway_id'), r.get('from_stop_id'), r.get('to_stop_id'), int(r.get('pathway_mode') or 0),
+                int(r.get('is_bidirectional') or 0), float(r['length']) if r.get('length') else None,
+                float(r['traversal_time']) if r.get('traversal_time') else None,
+                int(r['stair_count']) if r.get('stair_count') else None,
+                float(r['max_slope']) if r.get('max_slope') else None,
+                float(r['min_width']) if r.get('min_width') else None,
+                r.get('signposted_as',''), r.get('reversed_signposted_as','')))
+        if 'levels.txt' in names:
+            insert_table(con, zf, 'levels.txt', 'INSERT INTO levels VALUES(?,?,?)', lambda r: (
+                r.get('level_id'), float(r.get('level_index') or 0), r.get('level_name','')))
+        if 'transfers.txt' in names:
+            insert_table(con, zf, 'transfers.txt', 'INSERT INTO transfers VALUES(?,?,?,?,?,?,?,?)', lambda r: (
+                r.get('from_stop_id'), r.get('to_stop_id'), int(r.get('transfer_type') or 0),
+                int(r['min_transfer_time']) if r.get('min_transfer_time') else None,
+                r.get('from_route_id',''), r.get('to_route_id',''), r.get('from_trip_id',''), r.get('to_trip_id','')))
         print('Indexing stop times…', flush=True)
         count_times = insert_table(con, zf, 'stop_times.txt', 'INSERT INTO stop_times VALUES(?,?,?,?,?)', lambda r: (
             r.get('trip_id'), int(r.get('stop_sequence') or 0), r.get('stop_id'), parse_time(r.get('arrival_time')), parse_time(r.get('departure_time'))))
@@ -84,6 +113,8 @@ def build(archive: Path, destination: Path):
         CREATE INDEX idx_trips_shape ON trips(shape_id);
         CREATE INDEX idx_shapes_id_sequence ON shapes(shape_id,point_sequence);
         CREATE INDEX idx_stops_name ON stops(name COLLATE NOCASE);
+        CREATE INDEX idx_stops_wheelchair ON stops(wheelchair_boarding);
+        CREATE INDEX idx_trips_wheelchair ON trips(wheelchair_accessible);
         CREATE TABLE route_stops AS SELECT t.route_id,st.stop_id,MIN(st.stop_sequence) AS first_sequence
             FROM stop_times st JOIN trips t ON t.trip_id=st.trip_id GROUP BY t.route_id,st.stop_id;
         CREATE INDEX idx_route_stops_route ON route_stops(route_id,stop_id);
@@ -91,7 +122,7 @@ def build(archive: Path, destination: Path):
         ANALYZE;
     ''')
     con.commit()
-    counts = {table: con.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in ('routes','stops','trips','stop_times','shapes','route_stops')}
+    counts = {table: con.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in ('routes','stops','trips','stop_times','shapes','route_stops','pathways','levels','transfers')}
     con.close()
     print(f'Built {destination} from {archive.name}: {counts}; inserted {count_times} stop times and {count_shapes} shape points', flush=True)
 

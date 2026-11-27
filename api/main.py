@@ -77,6 +77,81 @@ def gtfs_connection():
     return con
 
 
+def read_accessibility_coverage(con):
+    if not con:
+        return {'available': False, 'wheelchair_stop_fields': False, 'wheelchair_trip_fields': False,
+                'pathways_available': False, 'note': 'Static bus GTFS is not indexed.'}
+    try:
+        stop_stats = con.execute('''SELECT COUNT(*) total,
+            SUM(CASE WHEN wheelchair_boarding IN (1,2) THEN 1 ELSE 0 END) known,
+            SUM(CASE WHEN wheelchair_boarding=1 THEN 1 ELSE 0 END) accessible
+            FROM stops''').fetchone()
+        trip_stats = con.execute('''SELECT COUNT(*) total,
+            SUM(CASE WHEN wheelchair_accessible IN (1,2) THEN 1 ELSE 0 END) known,
+            SUM(CASE WHEN wheelchair_accessible=1 THEN 1 ELSE 0 END) accessible
+            FROM trips''').fetchone()
+        pathway_count = con.execute('SELECT COUNT(*) FROM pathways').fetchone()[0]
+        elevator_count = con.execute('SELECT COUNT(*) FROM pathways WHERE pathway_mode=5').fetchone()[0]
+        stair_count = con.execute('SELECT COUNT(*) FROM pathways WHERE pathway_mode=2').fetchone()[0]
+    except sqlite3.Error:
+        return {'available': False, 'wheelchair_stop_fields': False, 'wheelchair_trip_fields': False,
+                'pathways_available': False, 'note': 'GTFS accessibility fields are not available in this index.'}
+    stop_known, trip_known = int(stop_stats['known'] or 0), int(trip_stats['known'] or 0)
+    complete = stop_known > 0 and trip_known > 0
+    return {
+        'available': complete,
+        'wheelchair_stop_fields': stop_known > 0,
+        'wheelchair_trip_fields': trip_known > 0,
+        'wheelchair_accessible_stops': int(stop_stats['accessible'] or 0),
+        'wheelchair_accessible_trips': int(trip_stats['accessible'] or 0),
+        'stops_with_accessibility_status': stop_known,
+        'trips_with_accessibility_status': trip_known,
+        'pathways_available': pathway_count > 0,
+        'pathways': pathway_count,
+        'elevator_pathways': elevator_count,
+        'stair_pathways': stair_count,
+        'note': 'Unknown accessibility values are not treated as accessible.' if complete else 'Current feed does not provide enough explicit bus and stop accessibility fields to verify a wheelchair-accessible journey.'
+    }
+
+
+def stop_wheelchair_access(con, stop_id):
+    row = con.execute('SELECT wheelchair_boarding,parent_station FROM stops WHERE stop_id=?', (stop_id,)).fetchone()
+    if not row:
+        return None
+    value = int(row['wheelchair_boarding'] or 0)
+    if value in (1, 2):
+        return value == 1
+    parent = row['parent_station']
+    if parent:
+        inherited = con.execute('SELECT wheelchair_boarding FROM stops WHERE stop_id=?', (parent,)).fetchone()
+        if inherited and int(inherited['wheelchair_boarding'] or 0) in (1, 2):
+            return int(inherited['wheelchair_boarding']) == 1
+    return None
+
+
+def leg_wheelchair_access(con, leg):
+    trip = con.execute('SELECT wheelchair_accessible FROM trips WHERE trip_id=?', (leg['trip_id'],)).fetchone()
+    trip_access = int(trip['wheelchair_accessible'] or 0) if trip else 0
+    from_access = stop_wheelchair_access(con, leg['from_id'])
+    to_access = stop_wheelchair_access(con, leg['to_id'])
+    values = [trip_access == 1, from_access is True, to_access is True]
+    if all(values):
+        status = 'verified_accessible'
+    elif trip_access == 2 or from_access is False or to_access is False:
+        status = 'not_accessible'
+    else:
+        status = 'unknown'
+    return {'status': status, 'trip_accessible': trip_access == 1 if trip_access in (1, 2) else None,
+            'from_stop_accessible': from_access, 'to_stop_accessible': to_access}
+
+
+def itinerary_wheelchair_access(con, itinerary):
+    legs = [leg_wheelchair_access(con, leg) for leg in itinerary['legs']]
+    status = 'verified_accessible' if legs and all(x['status'] == 'verified_accessible' for x in legs) else (
+        'not_accessible' if any(x['status'] == 'not_accessible' for x in legs) else 'unknown')
+    return {'status': status, 'legs': legs}
+
+
 def stop_matches(con, query: str, limit: int = 12):
     q = query.strip()
     if not con or not q:
@@ -213,6 +288,20 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
 
 _live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None}
 _live_lock = threading.Lock()
+
+
+def local_setting(name):
+    value = os.getenv(name, '').strip()
+    if value:
+        return value
+    try:
+        for line in (ROOT / '.env').read_text(encoding='utf-8').splitlines():
+            key, separator, value = line.partition('=')
+            if separator and key.strip() == name:
+                return value.strip().strip('"\'')
+    except OSError:
+        pass
+    return ''
 
 
 def live_vehicle_positions():
@@ -388,8 +477,50 @@ def data_status():
     if con:
         status['gtfs'] = {name: con.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in ('routes','stops','trips')}
         status['gtfs_source'] = 'Delhi Transport Stack static bus GTFS v32'
+        status['accessibility'] = read_accessibility_coverage(con)
         con.close()
     return status
+
+
+@app.get('/accessibility/status')
+def accessibility_status():
+    con = gtfs_connection()
+    result = read_accessibility_coverage(con)
+    if con:
+        con.close()
+    return result
+
+
+@app.get('/feature-readiness')
+def feature_readiness():
+    """Report evidence-backed readiness for delay, routing and safety features."""
+    con = gtfs_connection()
+    accessibility = read_accessibility_coverage(con)
+    if con:
+        con.close()
+    trip_updates = local_setting('OTD_TRIP_UPDATES_URL')
+    service_alerts = local_setting('OTD_SERVICE_ALERTS_URL')
+    pedestrian_key = local_setting('ORS_API_KEY')
+    return {
+        'live_vehicle_positions': {
+            'configured': bool(local_setting('OTD_API_KEY')),
+            'purpose': 'Map display only; vehicle positions do not establish schedule delay.'
+        },
+        'delay_alerts': {
+            'available': bool(trip_updates), 'trip_updates_configured': bool(trip_updates),
+            'service_alerts_configured': bool(service_alerts),
+            'purpose': 'Requires current GTFS-Realtime TripUpdates and ServiceAlerts feeds matched to this static GTFS.'
+        },
+        'accessibility': accessibility,
+        'pedestrian_routing': {
+            'configured': bool(pedestrian_key),
+            'purpose': 'Requires a pedestrian routing provider and usable stop/accessibility data.'
+        },
+        'women_safety': {
+            'available': False,
+            'purpose': 'No verified, sufficiently complete stop and street safety dataset is connected.'
+        }
+    }
 
 
 @app.get('/gps/route/{route_id}')
@@ -429,7 +560,7 @@ def stops(q: str = ''):
 
 
 @app.get('/plan')
-def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), comfort: int = 50, friendly: bool = False, special: bool = False):
+def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), comfort: int = 50, friendly: bool = False, special: bool = False, travel_profile: str = Query('standard', pattern='^(standard|comfort|family|older_adult|wheelchair|women_safety)$')):
     try:
         hour = int(time.split(':')[0])
     except (ValueError, IndexError):
@@ -452,10 +583,15 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
         destination_ids, destination_stops = stop_lookup(con, to or 'Connaught Place')
         services = active_services(con, chosen)
         itinerary_rows = find_itineraries(con, origin_ids, destination_ids, target_sec, services)
+        for itinerary in itinerary_rows:
+            itinerary['wheelchair_accessibility'] = itinerary_wheelchair_access(con, itinerary)
+        if travel_profile == 'wheelchair':
+            itinerary_rows = [itinerary for itinerary in itinerary_rows
+                              if itinerary['wheelchair_accessibility']['status'] == 'verified_accessible']
     rows=[]
     for itinerary in itinerary_rows[:6]:
         legs=[]; weighted_score=0; weighted_confidence=0; covered=0; record_total=0; duration_total=0
-        for raw in itinerary['legs']:
+        for leg_index, raw in enumerate(itinerary['legs']):
             route_label = raw.get('short_name') or raw.get('long_name') or str(raw['route_id'])
             duration = max(0, int(raw['arrival_sec']) - int(raw['departure_sec']))
             profile = profile_for(route_label, hour, day_type)
@@ -471,6 +607,8 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
             gps_distance = geometry_distance_km(geometry) if len(geometry) >= 2 else 0
             gps_minutes = (gps_distance / (gps_profile['median_speed_mps'] * 3.6) * 60
                            if gps_profile and gps_profile['median_speed_mps'] > 0 and gps_distance > 0 else None)
+            wheelchair = itinerary.get('wheelchair_accessibility', {}).get('legs', [])
+            wheelchair = wheelchair[leg_index] if leg_index < len(wheelchair) else {'status': 'unknown'}
             legs.append({
                 'mode':'bus','route_id':raw['route_id'],'route_short_name':route_label,
                 'headsign':raw.get('headsign') or '', 'from_stop_id':raw['from_id'],'to_stop_id':raw['to_id'],
@@ -484,6 +622,7 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 'historical_speed_hour':gps_profile.get('hour', hour) if gps_profile else None,
                 'historical_speed_hour_matched':gps_profile.get('hour_matched', True) if gps_profile else False,
                 'gps_speed_based_duration_min':round(gps_minutes) if gps_minutes is not None else None,
+                'wheelchair_accessibility':wheelchair,
             })
         mean = round(weighted_score / duration_total) if duration_total else 50
         crowd_available = covered == len(legs) and covered > 0
@@ -499,12 +638,25 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
             'crowd_score':mean,'crowd_label':label(mean),'activity_summary':crowd_txt,
             'crowd_data_backed':crowd_available,'confidence':round(weighted_confidence/duration_total,2) if duration_total else .18,
             'synthetic':False,'ticket_records':record_total,'legs':legs,
+            'wheelchair_accessibility':itinerary.get('wheelchair_accessibility',{}).get('status','unknown'),
             'verdict':'Fastest scheduled option' if len(rows)==0 else 'Alternative scheduled option'
         })
-    if friendly:
+    if friendly or travel_profile in ('comfort','family','older_adult'):
         lower_crowd = [row for row in rows if not row['crowd_data_backed'] or row['crowd_score'] < 68]
         direct = [row for row in lower_crowd if row['transfers'] == 0]
         rows = direct or lower_crowd or [row for row in rows if row['transfers'] == 0] or rows
+        if travel_profile in ('family','older_adult'):
+            rows.sort(key=lambda row: (row['transfers'], row['wait_min'], row['crowd_score'] if row['crowd_data_backed'] else 50, row['travel_time_min']))
+    coverage = read_accessibility_coverage(con)
+    profile_notice = None
+    if travel_profile in ('comfort', 'family', 'older_adult'):
+        profile_notice = 'This preference favors fewer transfers and lower sampled crowd. Walking distance and safety are not assessed with the available feeds.'
+    elif travel_profile == 'wheelchair':
+        profile_notice = 'Only routes with explicit accessible bus, boarding stops, and destination stops are shown. Unknown data is not treated as accessible.'
+        if not coverage['available']:
+            profile_notice = 'Wheelchair-accessible routes cannot be verified because the current bus GTFS lacks complete wheelchair fields. No route is labelled accessible.'
+    elif travel_profile == 'women_safety':
+        profile_notice = 'Verified safety information for stops and walking paths is not connected. These routes are not ranked as safer.'
     tip_time = None
     tip_text = 'No quieter departure is clear in the ticket sample for this day type.'
     if PROFILE:
@@ -538,10 +690,12 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
         special_notice = None
     return {
         'from': from_ or 'Kashmere Gate', 'to': to or 'Connaught Place', 'date': str(chosen),
-        'day_type': day_type, 'mode': 'bus', 'comfort': comfort,
+        'day_type': day_type, 'mode': 'bus', 'comfort': comfort, 'travel_profile': travel_profile,
         'relative_crowding_notice': 'Crowd scores rank October ticket activity matched to GTFS route names. Tickets cover a sample and are not passenger counts.',
         'options': rows, 'leave_tip': {'time': tip_time, 'text': tip_text, 'synthetic': False},
         'nearby_stop': None,
+        'profile_notice': profile_notice,
+        'accessibility': coverage,
         'special_day': special_notice,
         'data_backed': bool(PROFILE),'gtfs_backed':bool(con),'direct_pair_found':any(x['transfers']==0 for x in itinerary_rows),
         'itinerary_notice': 'Scheduled bus routes, stops, and shape geometry come from static GTFS. Times are scheduled and not traffic-adjusted.' if itinerary_rows else ('No matching scheduled bus itinerary was found for these stops, date, and departure time. Try a different stop suggestion or time.' if con else 'Static GTFS is not indexed; route path is illustrative.'),
