@@ -4,6 +4,6 @@
 2. Compare two scheduled options side by side and use the comfort slider to change their ranking. Explain that sampled tickets are not onboard passenger counts.
 3. Open a route detail and inspect the sampled ticket origin–destination pairs. Point out that these are route samples, not occupancy or seat availability.
 4. If a route has GPS coverage, compare its historical median speed and sample count. It is an October baseline, not live traffic or a schedule-delay forecast.
-5. Change departure hour and weekday/weekend, inspect the data-backed quieter-hour tip, toggle the crowd layer, and save a usual journey. The saved trip stays in that browser's local storage. Special-day context only flags unusual ticket sample volumes; it does not claim an event cause.
-6. Try the live-bus control only when an authorized OTD API key is configured. Without the key, the app reports that live positions are unavailable.
+5. Change departure hour and weekday/weekend, inspect the data-backed quieter-hour tip, toggle the crowd layer, and save a usual journey. The saved trip stays in that browser's local storage. Enable browser crowd alerts to receive a historical ticket-pattern notification every 30 minutes while the planner tab is open; this is not live occupancy or background push. Special-day context only flags unusual ticket sample volumes; it does not claim an event cause.
+6. Use the live-bus control with an authorized OTD API key. The app fetches current vehicle positions, when the feed is available.
 7. Show the validation page and its October 22–28 holdout, DTC Insights, CSV export, `/healthz`, `/data/status`, and `/docs`. The holdout measures ticket-rank stability, not actual onboard crowd accuracy. Explain that metro/AFC data still needs authorized access.

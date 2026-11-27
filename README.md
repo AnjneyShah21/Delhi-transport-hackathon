@@ -46,6 +46,9 @@ Route details also show sampled ticket origin–destination pairs for the select
 bus route and time band. These describe ticket activity, not onboard occupancy
 or seat availability. A usual journey is saved in the browser's local storage
 on that device and is restored on the next visit; it is not uploaded to the API.
+The optional crowd alert requests browser notification permission and checks the
+saved journey's historical ticket pattern every 30 minutes while the planner tab
+is open. It is not a live crowd alert or a background push notification.
 
 Useful endpoints: `/healthz`, `/data/status`, `/stops?q=...`, `/crowd/trends`,
 `/crowd/route/{route}`, `/gps/route/{route}?hour=8&day_type=weekday`,
