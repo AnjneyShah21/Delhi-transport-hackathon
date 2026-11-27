@@ -1,6 +1,12 @@
 from datetime import date
 import json
+import os
 import sqlite3
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -173,6 +179,87 @@ class Alert(BaseModel):
 
 
 alerts = []
+_live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None}
+_live_lock = threading.Lock()
+
+
+def live_vehicle_positions():
+    """Fetch and decode OTD's authorized GTFS-Realtime vehicle feed."""
+    api_key = os.getenv('OTD_API_KEY', '').strip()
+    if not api_key:
+        env_file = ROOT / '.env'
+        try:
+            for line in env_file.read_text(encoding='utf-8').splitlines():
+                key, separator, value = line.partition('=')
+                if separator and key.strip() == 'OTD_API_KEY':
+                    api_key = value.strip().strip('"\'')
+                    break
+        except OSError:
+            pass
+    if not api_key:
+        return {'available': False, 'configured': False, 'buses': [], 'note': 'Set OTD_API_KEY to enable live bus positions.'}
+    now = time.monotonic()
+    with _live_lock:
+        if _live_cache['expires'] > now:
+            if _live_cache['error']:
+                return {'available': False, 'configured': True, 'buses': [], 'note': _live_cache['error']}
+            return {'available': True, 'configured': True, 'timestamp': _live_cache['timestamp'], 'buses': _live_cache['buses']}
+        try:
+            from google.transit import gtfs_realtime_pb2
+            query = urllib.parse.urlencode({'key': api_key})
+            request = urllib.request.Request(
+                f'https://otd.delhi.gov.in/api/realtime/VehiclePositions.pb?{query}',
+                headers={'User-Agent': 'DelhiKiPublic/0.3 (GTFS-Realtime consumer)'},
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = response.read()
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(payload)
+
+            route_names = {}
+            trip_routes = {}
+            con = gtfs_connection()
+            if con:
+                route_names = {r['route_id']: r['short_name'] for r in con.execute('SELECT route_id,short_name FROM routes')}
+                trip_routes = {r['trip_id']: r['route_id'] for r in con.execute('SELECT trip_id,route_id FROM trips')}
+                con.close()
+
+            buses = []
+            for entity in feed.entity:
+                if not entity.HasField('vehicle'):
+                    continue
+                vehicle = entity.vehicle
+                if not vehicle.HasField('position'):
+                    continue
+                position = vehicle.position
+                if not (-90 <= position.latitude <= 90 and -180 <= position.longitude <= 180):
+                    continue
+                trip_id = vehicle.trip.trip_id if vehicle.HasField('trip') else ''
+                route_id = vehicle.trip.route_id if vehicle.HasField('trip') else ''
+                route_id = route_id or trip_routes.get(trip_id, '')
+                buses.append({
+                    'vehicle_id': vehicle.vehicle.id or entity.id,
+                    'label': vehicle.vehicle.label or '',
+                    'trip_id': trip_id,
+                    'route_id': route_id,
+                    'route': route_names.get(route_id, ''),
+                    'lat': position.latitude,
+                    'lon': position.longitude,
+                    'bearing': position.bearing if position.HasField('bearing') else None,
+                    'speed_mps': position.speed if position.HasField('speed') else None,
+                    'timestamp': int(vehicle.timestamp) if vehicle.HasField('timestamp') else None,
+                })
+            timestamp = int(feed.header.timestamp) if feed.header.HasField('timestamp') else None
+            _live_cache.update(expires=now + 15, timestamp=timestamp, buses=buses, error=None)
+            return {'available': True, 'configured': True, 'timestamp': timestamp, 'buses': buses}
+        except ModuleNotFoundError:
+            note = 'Install gtfs-realtime-bindings to decode live positions.'
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            note = f'Live feed is unavailable ({type(exc).__name__}). Check API access and network.'
+        except Exception as exc:
+            note = f'Could not decode the live feed ({type(exc).__name__}).'
+        _live_cache.update(expires=now + 10, timestamp=None, buses=[], error=note)
+        return {'available': False, 'configured': True, 'buses': [], 'note': note}
 
 
 def label(score):
@@ -389,7 +476,21 @@ def crowd_trends(day_type: str = 'weekday'):
 
 @app.get('/live/route/{id}')
 def live(id: str):
-    return {'route_id': id, 'buses': [], 'next_bus_eta_min': None, 'delay_adjustment': 'Live GTFS-RT feed not configured.', 'synthetic': True}
+    feed = live_vehicle_positions()
+    if not feed['available']:
+        return {'route_id': id, **feed, 'synthetic': True}
+    requested = id.strip().casefold()
+    buses = [b for b in feed['buses'] if b['route_id'].casefold() == requested or b['route'].casefold().startswith(requested)]
+    return {
+        'route_id': id,
+        'available': True,
+        'configured': True,
+        'timestamp': feed['timestamp'],
+        'buses': buses,
+        'count': len(buses),
+        'note': 'Live vehicle positions from the authorized Delhi OTD GTFS-Realtime feed.',
+        'synthetic': False,
+    }
 
 
 @app.get('/alerts')

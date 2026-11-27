@@ -27,10 +27,13 @@ index. The 433 MB generated index and the 64 MB ticket archive stay out of Git.
 This is a grouped statistical baseline, not a trained ML model. It exposes
 route crowd profiles, morning route insights, and hour-of-day trends from ticket
 records. Crowd values are relative percentiles within the sample and must not
-be read as passenger counts. The planner now uses GTFS stop names, service
+be read as passenger counts. The planner uses GTFS stop names, service
 calendars, scheduled trips, transfers, and route shapes. Scheduled durations do
-not account for traffic or delays. Live buses still need a DTC GTFS-RT API key;
-the 16 GB GPS archive and metro data have not been added.
+not account for traffic or delays. The `/live/route/{route}` endpoint decodes
+authorized Delhi OTD GTFS-RT positions when `OTD_API_KEY` is set. Copy
+`.env.example` to `.env`, add the key, and restart the API. `.env` is ignored by
+Git. GPS history is downloaded separately for delay and travel-time modelling;
+metro routing and AFC crowd estimates still need their respective feeds.
 
 Useful data endpoints: `/data/status`, `/stops?q=...`, `/crowd/trends`,
 `/crowd/route/{route}`, and `/insights`.

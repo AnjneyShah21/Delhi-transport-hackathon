@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30
 pandas>=2.2
 numpy>=2.0
 pyarrow>=17
+gtfs-realtime-bindings>=3.0,<4
