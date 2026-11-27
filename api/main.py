@@ -454,9 +454,51 @@ def crowd_route(id: str, day_type: str = 'weekday', hour: int = 8):
 
 @app.get('/crowd/segments/{route_id}')
 def segments(route_id: str, day_type: str = 'weekday', hour: int = 8):
-    p = profile_for(route_id, hour, day_type)
-    base = p['score'] if p else 50
-    return {'route_id': route_id, 'segments': [{'from_stop': 'Boarding stop', 'to_stop': 'Alighting stop', 'crowd_score': base, 'crowd_label': label(base), 'seat_chance': 'Likely standing' if base >= 68 else 'Varies; ticket sample only'}], 'synthetic': p is None}
+    if not PROFILE:
+        return {'route_id': route_id, 'segments': [], 'available': False, 'synthetic': True,
+                'note': 'Ticket profile has not been built.'}
+    wanted = route_id.strip().upper()
+    pairs = PROFILE.get('od_pairs', [])
+    matches = [p for p in pairs if str(p.get('route', '')).upper() == wanted]
+    if not matches:
+        matches = [p for p in pairs if str(p.get('route', '')).upper().startswith(wanted)]
+    selected = [p for p in matches if p.get('day_type') == day_type and int(p.get('hour', -1)) == int(hour)]
+    period_match = bool(selected)
+    if not selected:
+        selected = [p for p in matches if p.get('day_type') == day_type]
+    if not selected:
+        selected = matches
+    grouped = {}
+    for row in selected:
+        key = (str(row.get('from', '')).strip(), str(row.get('to', '')).strip())
+        if not all(key):
+            continue
+        acc = grouped.setdefault(key, {'ticket_records': 0, 'passenger_proxy': 0.0})
+        acc['ticket_records'] += int(row.get('ticket_records', 0) or 0)
+        acc['passenger_proxy'] += float(row.get('passenger_proxy', 0) or 0)
+    ranked = sorted(grouped.items(), key=lambda item: item[1]['ticket_records'], reverse=True)
+    count = len(ranked)
+    result = []
+    for index, ((from_stop, to_stop), values) in enumerate(ranked[:12]):
+        score = 50 if count <= 1 else round(100 * (count - index - 1) / (count - 1))
+        result.append({
+            'from_stop': from_stop,
+            'to_stop': to_stop,
+            'ticket_records': values['ticket_records'],
+            'passenger_proxy': round(values['passenger_proxy'], 1),
+            'relative_activity_score': score,
+            'relative_activity_label': 'Lower sampled activity' if score < 35 else 'Mid-range sampled activity' if score < 68 else 'Higher sampled activity',
+        })
+    return {
+        'route_id': route_id,
+        'segments': result,
+        'available': bool(result),
+        'day_type': day_type,
+        'hour': int(hour),
+        'period_matched': period_match,
+        'note': 'Ticket-derived origin–destination activity within the route sample. These records do not measure onboard occupancy or seat availability.',
+        'synthetic': False,
+    }
 
 
 @app.get('/crowd/heatmap')

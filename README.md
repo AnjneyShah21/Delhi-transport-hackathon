@@ -34,6 +34,9 @@ authorized Delhi OTD GTFS-RT positions when `OTD_API_KEY` is set. Copy
 `.env.example` to `.env`, add the key, and restart the API. `.env` is ignored by
 Git. GPS history is downloaded separately for delay and travel-time modelling;
 metro routing and AFC crowd estimates still need their respective feeds.
+Route details also show sampled ticket origin–destination pairs for the selected
+bus route and time band. These describe ticket activity, not onboard occupancy
+or seat availability.
 
 Useful data endpoints: `/data/status`, `/stops?q=...`, `/crowd/trends`,
 `/crowd/route/{route}`, and `/insights`.
