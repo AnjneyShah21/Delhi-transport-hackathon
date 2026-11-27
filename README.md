@@ -11,7 +11,9 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 make run
 ```
-Open http://localhost:8000. The committed ticket profile is ready to use. To enable scheduled bus routing from the committed GTFS feed, run `make gtfs` once before starting the app; this builds a local SQLite index (about 433 MB). No API keys are needed for the available bus planner.
+Open http://localhost:8000. The committed ticket and validation profiles are ready to use. `make run` builds the local GTFS SQLite index (about 433 MB) automatically on first launch. No API keys are needed for scheduled bus planning.
+Run `make inspect` to regenerate the schema and sample data report at `data_report.json` (ignored by Git because source samples can contain identifiers).
+To build the chronological crowd-rank validation report, run `make validation`; it trains on October 1–21 and holds out October 22–28. To build the historical GPS speed baseline, place the verified October GPS archive at `data/raw/delhi-dtc-bus-gtfs-rt-2026-10.7z` and run `make gps`; the default processes only October 1–7, one SQLite database at a time.
 
 ## October ticket data
 
@@ -32,18 +34,26 @@ calendars, scheduled trips, transfers, and route shapes. Scheduled durations do
 not account for traffic or delays. The `/live/route/{route}` endpoint decodes
 authorized Delhi OTD GTFS-RT positions when `OTD_API_KEY` is set. Copy
 `.env.example` to `.env` and add the key. `.env` is ignored by Git. GPS history
-is downloaded separately for delay and travel-time modelling;
-metro routing and AFC crowd estimates still need their respective feeds.
+is processed into historical route/hour speed baselines with `make gps`. The
+pipeline extracts one daily SQLite file at a time from the public archive and
+keeps only the small `data/processed/gps_speed_profiles.json` result. Median
+reported speeds are shown on matching journey legs with their sample counts.
+They are historical sampled speeds, not live traffic, schedule delay, or
+guaranteed journey times. GPS trip IDs do not consistently match scheduled
+GTFS trip IDs, so the app does not claim exact historical delay predictions.
+Metro routing and AFC crowd estimates still need their respective feeds.
 Route details also show sampled ticket origin–destination pairs for the selected
 bus route and time band. These describe ticket activity, not onboard occupancy
-or seat availability.
+or seat availability. A usual journey is saved in the browser's local storage
+on that device and is restored on the next visit; it is not uploaded to the API.
 
-Useful data endpoints: `/data/status`, `/stops?q=...`, `/crowd/trends`,
-`/crowd/route/{route}`, and `/insights`.
+Useful endpoints: `/healthz`, `/data/status`, `/stops?q=...`, `/crowd/trends`,
+`/crowd/route/{route}`, `/gps/route/{route}?hour=8&day_type=weekday`,
+`/accuracy`, and `/insights`.
 
 ## Data and assumptions
 
-The source README describes October 2026 ONDC tickets (`passenger_count`, `amount`, `vehicle_number`, `ticket_type_id`, `end_stop_name`, `route`, `start_stop_name`, `created_at`, `is_ac`) and daily SQLite vehicle feeds with a `vehicle_feed` table. The inspector discovers actual schemas first. GPS has gaps/noise and no indexes; process one day at a time. Bus static GTFS is included; metro data and live GTFS-RT are separate feeds and are not connected.
+The source README describes October 2026 ONDC tickets (`passenger_count`, `amount`, `vehicle_number`, `ticket_type_id`, `end_stop_name`, `route`, `start_stop_name`, `created_at`, `is_ac`) and daily SQLite vehicle feeds with a `vehicle_feed` table. The inspector discovers actual schemas first. The GPS archive is 16.1 GB compressed (124 GB expanded); `make gps` needs the archive at `data/raw/delhi-dtc-bus-gtfs-rt-2026-10.7z` and `py7zr`. It processes only the first seven days, one daily database at a time, and removes each extracted database after aggregation. Bus static GTFS is included; metro data and live GTFS-RT are separate feeds.
 
 ## Architecture
 
@@ -63,7 +73,7 @@ flowchart LR
 
 ## Limitations
 
-Ticket data samples roughly 3–4% of actual tickets; only relative levels should be interpreted. Vehicle numbers are missing for many ticket records. Bus route connectivity, schedule times, and shape geometry come from static GTFS, but schedules are not traffic-adjusted and walking access is not estimated. Live GTFS-RT needs an API key supplied via environment. Metro crowd profiles require AFC data. Historical delay modelling still depends on the GPS sample.
+Ticket data samples roughly 3–4% of actual tickets; only relative levels should be interpreted. Vehicle numbers are missing for many ticket records. Route detail shows sampled ticket OD pairs, not validated onboard segment loads; the app does not estimate seat availability. Bus route connectivity, schedule times, and shape geometry come from static GTFS, but schedules are not traffic-adjusted and walking-accessible nearby-stop search is not connected. Day profiles distinguish weekdays and weekends; they do not apply a holiday calendar. Historical GPS speeds may be sparse or noisy and only appear for route/hour groups with observations. Live GTFS-RT needs an API key supplied via `.env`; the key is never committed. Metro routing and crowd profiles require authorized metro schedule and AFC data. Ticket-volume anomaly flags do not identify events or weather. No Google Maps travel-time comparison is claimed.
 
 ## Docs
 

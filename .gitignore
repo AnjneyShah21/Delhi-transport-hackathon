@@ -11,6 +11,8 @@ data/raw/*
 !data/processed/
 data/processed/*
 !data/processed/crowd_profiles.json
+!data/processed/gps_speed_profiles.json
+!data/processed/crowd_validation.json
 *.parquet
 *.duckdb
 *.db

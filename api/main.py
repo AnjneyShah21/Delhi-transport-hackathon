@@ -8,16 +8,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
-from pydantic import BaseModel
 
-app = FastAPI(title='Delhi Ki Public API', description='Delhi Ki Public — Know the crowd before you board. Crowd scores are relative estimates, not passenger counts.', version='0.2.0')
+app = FastAPI(title='Delhi Ki Public API', description='Delhi Ki Public — Know the crowd before you board. Crowd scores are relative estimates, not passenger counts.', version='0.3.0')
 ROOT = Path(__file__).resolve().parent.parent
 PROFILE_FILE = ROOT / 'data' / 'processed' / 'crowd_profiles.json'
 GTFS_FILE = ROOT / 'data' / 'processed' / 'gtfs.sqlite'
+GPS_PROFILE_FILE = ROOT / 'data' / 'processed' / 'gps_speed_profiles.json'
+VALIDATION_FILE = ROOT / 'data' / 'processed' / 'crowd_validation.json'
 try:
     PROFILE = json.loads(PROFILE_FILE.read_text(encoding='utf-8'))
 except (OSError, json.JSONDecodeError):
@@ -26,6 +26,45 @@ PROFILE_INDEX = {
     (p['route'], p['hour'], p['day_type']): p
     for p in (PROFILE or {}).get('profiles', [])
 }
+try:
+    GPS_PROFILE = json.loads(GPS_PROFILE_FILE.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    GPS_PROFILE = None
+GPS_PROFILE_INDEX = {
+    (str(p['route_id']), int(p['hour']), p['day_type']): p
+    for p in (GPS_PROFILE or {}).get('profiles', [])
+}
+try:
+    VALIDATION = json.loads(VALIDATION_FILE.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    VALIDATION = None
+
+
+def gps_profile_for(route_id, hour, day_type):
+    if not GPS_PROFILE:
+        return None
+    route_id = str(route_id).strip()
+    found = GPS_PROFILE_INDEX.get((route_id, int(hour), day_type))
+    if found:
+        return found
+    rows = [p for p in GPS_PROFILE.get('profiles', [])
+            if str(p['route_id']) == route_id and p['day_type'] == day_type]
+    if not rows:
+        return None
+    nearest = min(rows, key=lambda p: abs(int(p['hour']) - int(hour)))
+    return {**nearest, 'observations': max(1, round(nearest['observations'] * .65)), 'hour_matched': False}
+
+
+def geometry_distance_km(points):
+    from math import asin, cos, radians, sin, sqrt
+    distance = 0.0
+    for a, b in zip(points, points[1:]):
+        lat1, lon1 = radians(float(a[0])), radians(float(a[1]))
+        lat2, lon2 = radians(float(b[0])), radians(float(b[1]))
+        dlat, dlon = lat2 - lat1, lon2 - lon1
+        h = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+        distance += 6371.0088 * 2 * asin(min(1.0, sqrt(h)))
+    return distance
 
 
 def gtfs_connection():
@@ -170,15 +209,6 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
     return result
 
 
-class Alert(BaseModel):
-    origin: str
-    destination: str
-    departure: str = '08:30'
-    day_type: str = 'weekday'
-    enabled: bool = True
-
-
-alerts = []
 _live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None}
 _live_lock = threading.Lock()
 
@@ -333,17 +363,53 @@ def frontend_script():
     return FileResponse(ROOT / 'frontend' / 'app.js', media_type='application/javascript')
 
 
+@app.get('/healthz')
+def healthcheck():
+    return {'status': 'ok', 'ticket_profiles': bool(PROFILE),
+            'gtfs_index': GTFS_FILE.exists(), 'gps_history': bool(GPS_PROFILE),
+            'crowd_validation': bool(VALIDATION)}
+
+
 @app.get('/data/status')
 def data_status():
     if not PROFILE:
-        return {'available': False, 'records': 0, 'routes': 0, 'gtfs_available': GTFS_FILE.exists(), 'source': 'Synthetic demo', 'note': 'Ticket archive not processed.'}
-    status = {'available': True, 'records': PROFILE['records_processed'], 'routes': PROFILE['route_count'], 'gtfs_available': GTFS_FILE.exists(), 'source': PROFILE['source'], 'note': 'Ticket crowd scores are relative and are not passenger counts. Static GTFS supplies bus stops, schedules and shapes; metro and live GPS feeds are still unconnected.'}
+        return {'available': False, 'records': 0, 'routes': 0, 'gtfs_available': GTFS_FILE.exists(), 'gps_history_available': bool(GPS_PROFILE), 'source': 'Synthetic demo', 'note': 'Ticket archive not processed.'}
+    status = {'available': True, 'records': PROFILE['records_processed'], 'routes': PROFILE['route_count'], 'gtfs_available': GTFS_FILE.exists(), 'gps_history_available': bool(GPS_PROFILE), 'gps_profile_count': len((GPS_PROFILE or {}).get('profiles', [])), 'source': PROFILE['source'], 'note': 'Ticket crowd scores are relative and are not passenger counts. Historical GPS speeds are a sampled baseline, not schedule-delay predictions. Static GTFS supplies schedules and shapes; live positions and metro data require separate feeds.'}
+    if GPS_PROFILE:
+        status['gps_history'] = {
+            'source': GPS_PROFILE.get('source'),
+            'files_processed': len(GPS_PROFILE.get('files_processed', [])),
+            'routes': len({p['route_id'] for p in GPS_PROFILE.get('profiles', [])}),
+            'limitations': GPS_PROFILE.get('limitations'),
+        }
     con = gtfs_connection()
     if con:
         status['gtfs'] = {name: con.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0] for name in ('routes','stops','trips')}
         status['gtfs_source'] = 'Delhi Transport Stack static bus GTFS v32'
         con.close()
     return status
+
+
+@app.get('/gps/route/{route_id}')
+def gps_route(route_id: str, day_type: str = Query('weekday', pattern='^(weekday|weekend)$'), hour: int = Query(8, ge=0, le=23)):
+    profile = gps_profile_for(route_id, hour, day_type)
+    if not profile:
+        return {'available': False, 'route_id': route_id, 'note': 'No historical GPS speed profile is loaded for this route and day type.'}
+    return {
+        'available': True, 'route_id': route_id, 'hour': profile['hour'],
+        'day_type': profile['day_type'], 'median_speed_kmh': round(profile['median_speed_mps'] * 3.6, 1),
+        'mean_speed_kmh': round(profile['mean_speed_mps'] * 3.6, 1),
+        'observations': profile['observations'], 'hour_matched': profile.get('hour_matched', True),
+        'source': (GPS_PROFILE or {}).get('source'),
+        'note': 'Historical sampled bus speed; it is not a live position or a schedule-delay prediction.',
+    }
+
+
+@app.get('/accuracy')
+def accuracy():
+    if not VALIDATION:
+        return {'available': False, 'note': 'Run make validation to build the chronological ticket holdout report.'}
+    return {'available': True, **VALIDATION}
 
 
 @app.get('/stops')
@@ -361,7 +427,7 @@ def stops(q: str = ''):
 
 
 @app.get('/plan')
-def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), mode: str = 'bus_metro', comfort: int = 50, friendly: bool = False, special: bool = False):
+def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), mode: str = 'bus', comfort: int = 50, friendly: bool = False, special: bool = False):
     try:
         hour = int(time.split(':')[0])
     except (ValueError, IndexError):
@@ -392,8 +458,6 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
             duration = max(0, int(raw['arrival_sec']) - int(raw['departure_sec']))
             profile = profile_for(route_label, hour, day_type)
             score = profile['score'] if profile else 50
-            if special and profile:
-                score = min(100, score + 8)
             record_total += profile['ticket_records'] if profile else 0
             if profile:
                 weighted_score += score * max(duration,1)
@@ -401,6 +465,10 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 duration_total += max(duration,1)
                 covered += 1
             geometry = leg_geometry(con, raw['trip_id'], raw['from_id'], raw['to_id'], raw.get('shape_id'))
+            gps_profile = gps_profile_for(raw['route_id'], hour, day_type)
+            gps_distance = geometry_distance_km(geometry) if len(geometry) >= 2 else 0
+            gps_minutes = (gps_distance / (gps_profile['median_speed_mps'] * 3.6) * 60
+                           if gps_profile and gps_profile['median_speed_mps'] > 0 and gps_distance > 0 else None)
             legs.append({
                 'mode':'bus','route_id':raw['route_id'],'route_short_name':route_label,
                 'headsign':raw.get('headsign') or '', 'from_stop_id':raw['from_id'],'to_stop_id':raw['to_id'],
@@ -408,11 +476,14 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 'departure_sec':int(raw['departure_sec']),'arrival_sec':int(raw['arrival_sec']),
                 'crowd_score':score if profile else None,'crowd_label':label(score) if profile else {'level':'unknown','en':'No ticket profile','hi':'टिकट डेटा नहीं'},
                 'confidence':profile['confidence'] if profile else 0,'ticket_records':profile['ticket_records'] if profile else 0,
-                'profile_hour':profile['hour'] if profile else None,'geometry':geometry
+                'profile_hour':profile['hour'] if profile else None,'geometry':geometry,
+                'historical_speed_kmh':round(gps_profile['median_speed_mps'] * 3.6, 1) if gps_profile else None,
+                'historical_speed_observations':gps_profile['observations'] if gps_profile else 0,
+                'historical_speed_hour':gps_profile.get('hour', hour) if gps_profile else None,
+                'historical_speed_hour_matched':gps_profile.get('hour_matched', True) if gps_profile else False,
+                'gps_speed_based_duration_min':round(gps_minutes) if gps_minutes is not None else None,
             })
         mean = round(weighted_score / duration_total) if duration_total else 50
-        if special and not covered:
-            mean = 50
         crowd_available = covered == len(legs) and covered > 0
         crowd_txt = 'Lower sampled activity' if mean < 35 else 'Mid-range sampled activity' if mean < 68 else 'Higher sampled activity'
         if not crowd_available:
@@ -429,18 +500,49 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
             'verdict':'Fastest scheduled option' if len(rows)==0 else 'Alternative scheduled option'
         })
     if friendly:
-        direct = [row for row in rows if row['transfers']==0]
-        rows = direct or rows
-    tip_time = '11:30' if hour < 10 else '14:30' if hour < 16 else '17:30'
+        lower_crowd = [row for row in rows if not row['crowd_data_backed'] or row['crowd_score'] < 68]
+        direct = [row for row in lower_crowd if row['transfers'] == 0]
+        rows = direct or lower_crowd or [row for row in rows if row['transfers'] == 0] or rows
+    tip_time = None
+    tip_text = 'No quieter departure is clear in the ticket sample for this day type.'
+    if PROFILE:
+        hours = [p for p in PROFILE.get('hourly', []) if p['day_type'] == day_type]
+        current = next((p for p in hours if int(p['hour']) == hour), None)
+        quieter = [p for p in hours if current and 6 <= int(p['hour']) <= 20 and
+                   abs(int(p['hour']) - hour) <= 3 and int(p['hour']) != hour and
+                   p['score'] <= current['score'] - 8]
+        if quieter:
+            suggested = min(quieter, key=lambda p: (abs(int(p['hour']) - hour), p['score']))
+            suggested_hour = int(suggested['hour'])
+            tip_time = f'{suggested_hour:02d}:30'
+            tip_text = (f"The city-wide ticket sample shows lower relative activity around {suggested_hour}:00 "+
+                        f"({suggested['score']}/100) than at {hour}:00 ({current['score']}/100). " +
+                        'Crowd data is hourly; check the scheduled buses after applying the time.')
+    anomalies = (VALIDATION or {}).get('daily_ticket_anomalies', [])
+    selected_anomaly = next((x for x in anomalies if x['date'] == str(chosen)), None)
+    if selected_anomaly:
+        direction = 'above' if selected_anomaly['direction'] == 'high' else 'below'
+        special_notice = {
+            'active': True, 'source': 'historical_ticket_volume',
+            'message': (f"The October ticket sample for this date was {abs(selected_anomaly['deviation_percent']):g}% {direction} its "+
+                        'weekday/weekend median. This is a sample-volume anomaly; its cause is unknown and crowd scores are not adjusted.'),
+        }
+    elif special:
+        special_notice = {
+            'active': False, 'source': 'historical_ticket_volume',
+            'message': 'No matching unusual ticket-volume day is available for this date; no crowd-score adjustment was made.',
+        }
+    else:
+        special_notice = None
     return {
         'from': from_ or 'Kashmere Gate', 'to': to or 'Connaught Place', 'date': str(chosen),
         'day_type': day_type, 'mode': mode, 'comfort': comfort,
         'relative_crowding_notice': 'Crowd scores rank October ticket activity matched to GTFS route names. Tickets cover a sample and are not passenger counts.',
-        'options': rows, 'leave_tip': {'time': tip_time, 'text': f'Try {tip_time}: compare the scheduled bus options and ticket crowd profile.', 'synthetic': False},
+        'options': rows, 'leave_tip': {'time': tip_time, 'text': tip_text, 'synthetic': False},
         'nearby_stop': None,
-        'special_day': {'active': True, 'message': 'Illustrative what-if adjustment: +8 crowd points. No special-event history is connected.'} if special else None,
+        'special_day': special_notice,
         'data_backed': bool(PROFILE),'gtfs_backed':bool(con),'direct_pair_found':any(x['transfers']==0 for x in itinerary_rows),
-        'itinerary_notice': ('Scheduled bus routes, stops, and shape geometry come from static GTFS. Times are scheduled and not traffic-adjusted.' + (' The current preference is bus + metro, but metro routing data is not connected; these options are bus-only.' if mode=='bus_metro' else '')) if itinerary_rows else ('No matching scheduled bus itinerary was found for these stops, date, and departure time. Try a different stop suggestion or time.' if con else 'Static GTFS is not indexed; route path is illustrative.'),
+        'itinerary_notice': ('Scheduled bus routes, stops, and shape geometry come from static GTFS. Times are scheduled and not traffic-adjusted.' + (' Metro routing data is not connected; these options are bus-only.' if mode=='bus_metro' else '')) if itinerary_rows else ('No matching scheduled bus itinerary was found for these stops, date, and departure time. Try a different stop suggestion or time.' if con else 'Static GTFS is not indexed; route path is illustrative.'),
         'synthetic': not bool(itinerary_rows)
     }
 
@@ -506,7 +608,27 @@ def heatmap(hour: int = 8, day_type: str = 'weekday'):
     if not PROFILE:
         return {'hour': hour, 'day_type': day_type, 'points': [], 'synthetic': True}
     routes = sorted((p for p in PROFILE['profiles'] if p['hour'] == hour and p['day_type'] == day_type), key=lambda p: p['score'], reverse=True)[:8]
-    return {'hour': hour, 'day_type': day_type, 'points': [], 'route_profiles': routes, 'synthetic': False, 'note': 'Ticket data has no stop coordinates; geographic heatmap awaits GTFS stop locations.'}
+    con = gtfs_connection()
+    shapes = []
+    if con:
+        for profile in routes:
+            route = con.execute('SELECT route_id FROM routes WHERE upper(short_name)=?', (profile['route'].upper(),)).fetchone()
+            if not route:
+                continue
+            shape = con.execute('''SELECT t.shape_id,COUNT(*) AS points FROM trips t JOIN shapes s USING(shape_id)
+                WHERE t.route_id=? AND t.shape_id<>'' GROUP BY t.shape_id ORDER BY points DESC LIMIT 1''', (route['route_id'],)).fetchone()
+            if not shape:
+                continue
+            geometry = [[float(r['lat']), float(r['lon'])] for r in con.execute(
+                'SELECT lat,lon FROM shapes WHERE shape_id=? ORDER BY point_sequence', (shape['shape_id'],))]
+            if len(geometry) >= 2:
+                shapes.append({'route':profile['route'], 'route_id':route['route_id'],
+                               'score':profile['score'], 'ticket_records':profile['ticket_records'],
+                               'geometry':geometry})
+        con.close()
+    return {'hour': hour, 'day_type': day_type, 'points': [], 'route_profiles': routes,
+            'route_shapes': shapes, 'synthetic': False,
+            'note': 'Relative ticket activity mapped to representative GTFS route shapes; these are not passenger-density or occupancy measurements.'}
 
 
 @app.get('/crowd/trends')
@@ -533,17 +655,6 @@ def live(id: str):
         'note': 'Live vehicle positions from the authorized Delhi OTD GTFS-Realtime feed.',
         'synthetic': False,
     }
-
-
-@app.get('/alerts')
-def get_alerts():
-    return alerts
-
-
-@app.post('/alerts')
-def post_alert(a: Alert):
-    alerts.append(a.model_dump())
-    return {'saved': True, 'alert': a}
 
 
 @app.get('/insights')

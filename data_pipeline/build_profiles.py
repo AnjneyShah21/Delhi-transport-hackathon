@@ -62,11 +62,13 @@ def build(archive: Path, output: Path) -> dict:
     grouped['confidence'] = (0.35 + 0.12 * (grouped['tickets'].clip(upper=100) / 100).pow(0.5)).clip(upper=0.8).round(2)
     grouped = grouped.sort_values(['route', 'day_type', 'hour'])
     routes = sorted(grouped['route'].unique().tolist())
-    # Keep a compact hourly curve using route medians, useful when the user
-    # hasn't selected a particular route.
+    # Compare total daily ticket activity across hours to show a useful
+    # network-level quiet-hour curve. Median within-hour route rank would be
+    # nearly 50 by construction and would not show peak/off-peak patterns.
     hourly = grouped.groupby(['hour', 'day_type'], as_index=False).agg(
-        score=('crowd_score', 'median'), ticket_records=('tickets', 'sum')
+        ticket_records=('tickets', 'sum')
     )
+    hourly['score'] = hourly.groupby('day_type')['ticket_records'].rank(pct=True, method='average').mul(100).round().astype(int)
     route_totals = grouped.groupby('route', as_index=False).agg(ticket_records=('tickets', 'sum'), passenger_proxy=('passenger_proxy', 'sum'))
     route_totals = route_totals.sort_values('ticket_records', ascending=False)
     route_rank = route_totals.set_index('route')['ticket_records'].rank(pct=True).mul(100).round().astype(int).to_dict()

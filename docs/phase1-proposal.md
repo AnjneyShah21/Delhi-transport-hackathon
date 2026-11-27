@@ -2,16 +2,16 @@
 
 ## Purpose
 
-Build an open, mobile-first Delhi journey planner that helps commuters compare travel time with relative bus crowdedness. It uses October 2026 ONDC e-ticketing records, static GTFS and a bounded one-week sample of vehicle GPS history. Since e-ticketing captures only about 3–4% of trips, crowd scores express relative percentiles within route, stop segment, hour and day type. They do not estimate absolute passenger loads.
+Build an open, mobile-first Delhi journey planner that helps commuters compare scheduled bus travel with relative ticket activity. The current build uses the October 2026 ONDC e-ticket sample, static bus GTFS and the first week of October DTC GPS history. Ticket records cover only a small sample and do not measure absolute passenger loads.
 
 ## Method
 
-First inspect files and schema, then normalize timestamps to Asia/Kolkata, validate stop and route keys, and cache compact aggregates to Parquet. Spread each observed ticket between start and end stop after matching to ordered route stops. Calculate median/mean profiles by hour and weekday/weekend/holiday type. Convert distributions to 0–100 route-relative scores and Low/Medium/High labels. Keep sample count and confidence alongside every estimate. Flag unusual daily totals against a robust baseline; do not attribute a cause without weather/event data.
+The current crowd profile groups ticket records into route/hour and weekday/weekend relative activity scores and sampled origin–destination pairs. It preserves sample counts and confidence and does not infer passenger loads, seats or onboard occupancy. GPS history is grouped into route/local-hour/weekend median and mean reported speeds with sample counts. These historical speeds are displayed as context; GPS trip IDs do not consistently map to scheduled GTFS trips, so they are not presented as exact schedule delays. Static GTFS supplies stops, scheduled trips and route shapes.
 
 ## Evaluation and delivery
 
-Use a chronological held-out week. Report MAE for scores and Spearman rank correlation; compare morning/evening peaks, day types and trunk routes. Add OD examples comparing fastest and least-crowded routes. An initial demo UI/API uses synthetic placeholders only; it must not present those as measured performance. No actual data files are currently present, so model metrics await data placement.
+The app and grouped statistical profiles are implemented. A chronological ticket-rank check trains on October 1–21 and tests on October 22–28: 44 route-hour bands (22,283 supported route-hour-day cells) yield mean Spearman rank correlation 0.769 and mean percentile-rank MAE 13.7 points. This measures stability of sampled ticket rankings, not accuracy against actual onboard crowding. No supervised machine-learning model has been trained; a Google Maps comparison has not been performed.
 
 ## Risks and constraints
 
-Ticket sample bias and missing vehicle identifiers limit absolute load inference. Stop-name matching can be ambiguous. Historical GPS databases are large and unindexed, so extract and stream one day at a time for at most one week. GTFS-RT access needs an uncommitted API key. Metro crowding requires AFC records. The project will document unavailable data and confidence rather than invent measurements.
+Ticket sample bias and missing vehicle identifiers limit crowd inference. Stop-name matching can be ambiguous. The 16.1 GB compressed GPS archive expands to about 124 GB, so process one daily SQLite file at a time and retain only compact profiles. Live GTFS-RT needs an authorized API key. Metro routing and crowd estimates need current authorized schedule and AFC feeds. The app reports these data gaps rather than inventing results.
