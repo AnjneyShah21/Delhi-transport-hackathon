@@ -58,7 +58,7 @@ Useful endpoints: `/healthz`, `/data/status`, `/stops?q=...`, `/crowd/trends`,
 `/accuracy`, `/insights`, `/network`, `/network/simulate`, and
 `/assistant/parse`.
 
-## Digital twin, conversational planning, and Journey Guardian
+## Digital twin and conversational planning
 
 The Insights view draws all indexed GTFS route shapes and lets a passenger run
 what-if tests for route-corridor slowdown, a route outage, increased demand,
@@ -73,12 +73,8 @@ It does not call a remote or trained AI model. Walking minimization currently
 uses a direct-route preference because no pedestrian routing graph is
 connected.
 
-Journey Guardian is an opt-in, while-open-page browser feature. It checks the
-device location locally for approaching destination and possible missed
-transfer stops; route-wide live-feed hints can flag a possible transfer risk.
-It cannot confirm which bus the passenger boarded, and revised options are
-scheduled alternatives. See [the feature notes](docs/network-simulation.md)
-for behavior, thresholds, data sources, and limitations.
+See [the feature notes](docs/network-simulation.md) for scenario behavior,
+assumptions, data sources, and limitations.
 
 ## Data and assumptions
 

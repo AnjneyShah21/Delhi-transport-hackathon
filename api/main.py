@@ -230,21 +230,6 @@ def leg_geometry(con, trip_id, from_stop_id, to_stop_id, shape_id):
     return [[float(lat),float(lon)] for lat,lon in points]
 
 
-def leg_stop_points(con, trip_id, from_sequence, to_sequence):
-    if from_sequence is None or to_sequence is None:
-        return []
-    low, high = sorted((int(from_sequence), int(to_sequence)))
-    rows = con.execute('''SELECT s.stop_id,s.name,s.lat,s.lon,st.arrival_sec,st.departure_sec,st.stop_sequence
-        FROM stop_times st JOIN stops s ON s.stop_id=st.stop_id
-        WHERE st.trip_id=? AND st.stop_sequence BETWEEN ? AND ? ORDER BY st.stop_sequence''',
-        (trip_id,low,high)).fetchall()
-    return [{'stop_id':r['stop_id'],'name':r['name'],'lat':float(r['lat']) if r['lat'] is not None else None,
-             'lon':float(r['lon']) if r['lon'] is not None else None,
-             'arrival_sec':int(r['arrival_sec']) if r['arrival_sec'] is not None else None,
-             'departure_sec':int(r['departure_sec']) if r['departure_sec'] is not None else None,
-             'sequence':int(r['stop_sequence'])} for r in rows]
-
-
 def find_itineraries(con, origin_ids, destination_ids, target_sec, services, excluded_routes=None):
     if not origin_ids or not destination_ids or not services:
         return []
@@ -829,7 +814,6 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 'crowd_score':score if profile else None,'crowd_label':label(score) if profile else {'level':'unknown','en':'No ticket profile','hi':'टिकट डेटा नहीं'},
                 'confidence':profile['confidence'] if profile else 0,'ticket_records':profile['ticket_records'] if profile else 0,
                 'profile_hour':profile['hour'] if profile else None,'geometry':geometry,
-                'stops':leg_stop_points(con,raw['trip_id'],raw.get('from_seq'),raw.get('to_seq')),
                 'historical_speed_kmh':round(gps_profile['median_speed_mps'] * 3.6, 1) if gps_profile else None,
                 'historical_speed_observations':gps_profile['observations'] if gps_profile else 0,
                 'historical_speed_hour':gps_profile.get('hour', hour) if gps_profile else None,
