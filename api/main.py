@@ -343,7 +343,7 @@ def route_options(hour, day_type, origin, destination):
 
 def option(route, mins, transfers, score, confidence, walking=5, synthetic=True):
     return {
-        'name': f'Route {route} · {"Direct bus" if transfers == 0 else "Bus + Metro"}',
+        'name': f'Route {route} · {"Direct bus" if transfers == 0 else "Bus transfer"}',
         'travel_time_min': mins, 'transfers': transfers, 'walking_min': walking,
         'crowd_score': int(score), 'crowd_label': label(score),
         'activity_summary': 'Lower sampled activity' if score < 35 else ('Mid-range sampled activity' if score < 68 else 'Higher sampled activity'),
@@ -374,7 +374,7 @@ def healthcheck():
 def data_status():
     if not PROFILE:
         return {'available': False, 'records': 0, 'routes': 0, 'gtfs_available': GTFS_FILE.exists(), 'gps_history_available': bool(GPS_PROFILE), 'source': 'Synthetic demo', 'note': 'Ticket archive not processed.'}
-    status = {'available': True, 'records': PROFILE['records_processed'], 'routes': PROFILE['route_count'], 'gtfs_available': GTFS_FILE.exists(), 'gps_history_available': bool(GPS_PROFILE), 'gps_profile_count': len((GPS_PROFILE or {}).get('profiles', [])), 'source': PROFILE['source'], 'note': 'Ticket crowd scores are relative and are not passenger counts. Historical GPS speeds are a sampled baseline, not schedule-delay predictions. Static GTFS supplies schedules and shapes; live positions and metro data require separate feeds.'}
+    status = {'available': True, 'records': PROFILE['records_processed'], 'routes': PROFILE['route_count'], 'gtfs_available': GTFS_FILE.exists(), 'gps_history_available': bool(GPS_PROFILE), 'gps_profile_count': len((GPS_PROFILE or {}).get('profiles', [])), 'source': PROFILE['source'], 'note': 'Ticket crowd scores are relative and are not passenger counts. Historical GPS speeds are a sampled baseline, not schedule-delay predictions. Static GTFS supplies schedules and shapes; live positions require a separate feed.'}
     if GPS_PROFILE:
         status['gps_history'] = {
             'source': GPS_PROFILE.get('source'),
@@ -427,7 +427,7 @@ def stops(q: str = ''):
 
 
 @app.get('/plan')
-def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), mode: str = 'bus', comfort: int = 50, friendly: bool = False, special: bool = False):
+def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), comfort: int = 50, friendly: bool = False, special: bool = False):
     try:
         hour = int(time.split(':')[0])
     except (ValueError, IndexError):
@@ -536,13 +536,13 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
         special_notice = None
     return {
         'from': from_ or 'Kashmere Gate', 'to': to or 'Connaught Place', 'date': str(chosen),
-        'day_type': day_type, 'mode': mode, 'comfort': comfort,
+        'day_type': day_type, 'mode': 'bus', 'comfort': comfort,
         'relative_crowding_notice': 'Crowd scores rank October ticket activity matched to GTFS route names. Tickets cover a sample and are not passenger counts.',
         'options': rows, 'leave_tip': {'time': tip_time, 'text': tip_text, 'synthetic': False},
         'nearby_stop': None,
         'special_day': special_notice,
         'data_backed': bool(PROFILE),'gtfs_backed':bool(con),'direct_pair_found':any(x['transfers']==0 for x in itinerary_rows),
-        'itinerary_notice': ('Scheduled bus routes, stops, and shape geometry come from static GTFS. Times are scheduled and not traffic-adjusted.' + (' Metro routing data is not connected; these options are bus-only.' if mode=='bus_metro' else '')) if itinerary_rows else ('No matching scheduled bus itinerary was found for these stops, date, and departure time. Try a different stop suggestion or time.' if con else 'Static GTFS is not indexed; route path is illustrative.'),
+        'itinerary_notice': 'Scheduled bus routes, stops, and shape geometry come from static GTFS. Times are scheduled and not traffic-adjusted.' if itinerary_rows else ('No matching scheduled bus itinerary was found for these stops, date, and departure time. Try a different stop suggestion or time.' if con else 'Static GTFS is not indexed; route path is illustrative.'),
         'synthetic': not bool(itinerary_rows)
     }
 

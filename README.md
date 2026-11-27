@@ -2,7 +2,7 @@
 
 > **Know the crowd before you board.**
 
-Delhi Ki Public is a crowdedness-aware Delhi bus and metro journey planner for the Transport Stack Hackathon 2026. Crowd estimates are **relative**: ticketing covers only about 3–4% of real bus tickets, so scores compare route, segment, time band and day type; they are not passenger counts.
+Delhi Ki Public is a crowdedness-aware Delhi bus journey planner for the Transport Stack Hackathon 2026. Crowd estimates are **relative**: ticketing covers only about 3–4% of real bus tickets, so scores compare route, segment, time band and day type; they are not passenger counts.
 
 ## Quick start
 
@@ -41,7 +41,6 @@ reported speeds are shown on matching journey legs with their sample counts.
 They are historical sampled speeds, not live traffic, schedule delay, or
 guaranteed journey times. GPS trip IDs do not consistently match scheduled
 GTFS trip IDs, so the app does not claim exact historical delay predictions.
-Metro routing and AFC crowd estimates still need their respective feeds.
 Route details also show sampled ticket origin–destination pairs for the selected
 bus route and time band. These describe ticket activity, not onboard occupancy
 or seat availability. A usual journey is saved in the browser's local storage
@@ -56,7 +55,7 @@ Useful endpoints: `/healthz`, `/data/status`, `/stops?q=...`, `/crowd/trends`,
 
 ## Data and assumptions
 
-The source README describes October 2026 ONDC tickets (`passenger_count`, `amount`, `vehicle_number`, `ticket_type_id`, `end_stop_name`, `route`, `start_stop_name`, `created_at`, `is_ac`) and daily SQLite vehicle feeds with a `vehicle_feed` table. The inspector discovers actual schemas first. The GPS archive is 16.1 GB compressed (124 GB expanded); `make gps` needs the archive at `data/raw/delhi-dtc-bus-gtfs-rt-2026-10.7z` and `py7zr`. It processes only the first seven days, one daily database at a time, and removes each extracted database after aggregation. Bus static GTFS is included; metro data and live GTFS-RT are separate feeds.
+The source README describes October 2026 ONDC tickets (`passenger_count`, `amount`, `vehicle_number`, `ticket_type_id`, `end_stop_name`, `route`, `start_stop_name`, `created_at`, `is_ac`) and daily SQLite vehicle feeds with a `vehicle_feed` table. The inspector discovers actual schemas first. The GPS archive is 16.1 GB compressed (124 GB expanded); `make gps` needs the archive at `data/raw/delhi-dtc-bus-gtfs-rt-2026-10.7z` and `py7zr`. It processes only the first seven days, one daily database at a time, and removes each extracted database after aggregation. Bus static GTFS is included; live GTFS-RT is a separate feed.
 
 ## Architecture
 
@@ -76,7 +75,7 @@ flowchart LR
 
 ## Limitations
 
-Ticket data samples roughly 3–4% of actual tickets; only relative levels should be interpreted. Vehicle numbers are missing for many ticket records. Route detail shows sampled ticket OD pairs, not validated onboard segment loads; the app does not estimate seat availability. Bus route connectivity, schedule times, and shape geometry come from static GTFS, but schedules are not traffic-adjusted and walking-accessible nearby-stop search is not connected. Day profiles distinguish weekdays and weekends; they do not apply a holiday calendar. Historical GPS speeds may be sparse or noisy and only appear for route/hour groups with observations. Live GTFS-RT needs an API key supplied via `.env`; the key is never committed. Metro routing and crowd profiles require authorized metro schedule and AFC data. Ticket-volume anomaly flags do not identify events or weather. No Google Maps travel-time comparison is claimed.
+Ticket data samples roughly 3–4% of actual tickets; only relative levels should be interpreted. Vehicle numbers are missing for many ticket records. Route detail shows sampled ticket OD pairs, not validated onboard segment loads; the app does not estimate seat availability. Bus route connectivity, schedule times, and shape geometry come from static GTFS, but schedules are not traffic-adjusted and walking-accessible nearby-stop search is not connected. Day profiles distinguish weekdays and weekends; they do not apply a holiday calendar. Historical GPS speeds may be sparse or noisy and only appear for route/hour groups with observations. Live GTFS-RT needs an API key supplied via `.env`; the key is never committed. Ticket-volume anomaly flags do not identify events or weather. No Google Maps travel-time comparison is claimed.
 
 ## Docs
 

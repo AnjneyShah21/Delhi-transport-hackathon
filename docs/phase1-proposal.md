@@ -14,4 +14,4 @@ The app and grouped statistical profiles are implemented. A chronological ticket
 
 ## Risks and constraints
 
-Ticket sample bias and missing vehicle identifiers limit crowd inference. Stop-name matching can be ambiguous. The 16.1 GB compressed GPS archive expands to about 124 GB, so process one daily SQLite file at a time and retain only compact profiles. Live GTFS-RT needs an authorized API key. Metro routing and crowd estimates need current authorized schedule and AFC feeds. The app reports these data gaps rather than inventing results.
+Ticket sample bias and missing vehicle identifiers limit crowd inference. Stop-name matching can be ambiguous. The 16.1 GB compressed GPS archive expands to about 124 GB, so process one daily SQLite file at a time and retain only compact profiles. Live GTFS-RT needs an authorized API key. The app reports data gaps rather than inventing results.
