@@ -319,7 +319,7 @@ def stops_near(lat, lon, radius_m=35):
     return False
 
 
-def annotate_live_motion(buses, observed_at):
+def annotate_live_motion(buses):
     """Flag repeated slow, stationary fresh positions away from mapped bus stops."""
     now = time.monotonic()
     with _motion_lock:
@@ -443,7 +443,7 @@ def live_vehicle_positions():
                     'age_seconds': age_seconds,
                     'is_fresh': age_seconds is not None and -180 <= age_seconds <= 120,
                 })
-            annotate_live_motion(buses, timestamp)
+            annotate_live_motion(buses)
             _live_cache.update(expires=now + 15, timestamp=timestamp, buses=buses,
                                error=None, source=feed_source)
             return {'available': True, 'configured': True, 'source': feed_source,
