@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from api.intent_parser import parse_request
 
 app = FastAPI(title='Delhi Ki Public API', description='Delhi Ki Public — Know the crowd before you board. Crowd scores are relative estimates, not passenger counts.', version='0.3.0')
 ROOT = Path(__file__).resolve().parent.parent
@@ -229,11 +230,28 @@ def leg_geometry(con, trip_id, from_stop_id, to_stop_id, shape_id):
     return [[float(lat),float(lon)] for lat,lon in points]
 
 
-def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
+def leg_stop_points(con, trip_id, from_sequence, to_sequence):
+    if from_sequence is None or to_sequence is None:
+        return []
+    low, high = sorted((int(from_sequence), int(to_sequence)))
+    rows = con.execute('''SELECT s.stop_id,s.name,s.lat,s.lon,st.arrival_sec,st.departure_sec,st.stop_sequence
+        FROM stop_times st JOIN stops s ON s.stop_id=st.stop_id
+        WHERE st.trip_id=? AND st.stop_sequence BETWEEN ? AND ? ORDER BY st.stop_sequence''',
+        (trip_id,low,high)).fetchall()
+    return [{'stop_id':r['stop_id'],'name':r['name'],'lat':float(r['lat']) if r['lat'] is not None else None,
+             'lon':float(r['lon']) if r['lon'] is not None else None,
+             'arrival_sec':int(r['arrival_sec']) if r['arrival_sec'] is not None else None,
+             'departure_sec':int(r['departure_sec']) if r['departure_sec'] is not None else None,
+             'sequence':int(r['stop_sequence'])} for r in rows]
+
+
+def find_itineraries(con, origin_ids, destination_ids, target_sec, services, excluded_routes=None):
     if not origin_ids or not destination_ids or not services:
         return []
+    excluded_routes = list(dict.fromkeys(excluded_routes or []))
     origin_marks = ','.join('?' for _ in origin_ids)
     dest_marks = ','.join('?' for _ in destination_ids)
+    exclude_clause = f" AND t.route_id NOT IN ({','.join('?' for _ in excluded_routes)})" if excluded_routes else ''
     service_clause = ''
     service_args = []
     if services:
@@ -246,9 +264,9 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
         JOIN trips t ON t.trip_id=a.trip_id JOIN routes r ON r.route_id=t.route_id
         JOIN stops fs ON fs.stop_id=a.stop_id JOIN stops ts ON ts.stop_id=b.stop_id
         WHERE a.stop_id IN ({origin_marks}) AND b.stop_id IN ({dest_marks})
-        AND a.departure_sec>=? AND a.departure_sec<=? {service_clause}
+        AND a.departure_sec>=? AND a.departure_sec<=? {service_clause}{exclude_clause}
         ORDER BY a.departure_sec,b.arrival_sec LIMIT 300'''
-    args = [*origin_ids,*destination_ids,target_sec,target_sec+4*3600,*service_args]
+    args = [*origin_ids,*destination_ids,target_sec,target_sec+4*3600,*service_args,*excluded_routes]
     direct_rows = con.execute(direct_sql,args).fetchall()
     itineraries=[]
     seen_routes=set()
@@ -264,7 +282,7 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
 
     dest_routes=[r['route_id'] for r in con.execute(
         f'''SELECT DISTINCT t.route_id FROM stop_times st JOIN trips t ON t.trip_id=st.trip_id
-            WHERE st.stop_id IN ({dest_marks}) {service_clause}''', [*destination_ids,*service_args]).fetchall()]
+            WHERE st.stop_id IN ({dest_marks}) {service_clause}{exclude_clause}''', [*destination_ids,*service_args,*excluded_routes]).fetchall()]
     if not dest_routes:
         return []
     dest_route_marks=','.join('?' for _ in dest_routes)
@@ -274,11 +292,11 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
         a.stop_sequence AS from_seq,b.stop_sequence AS transfer_seq,fs.name AS from_name,xs.name AS transfer_name
         FROM stop_times a JOIN stop_times b ON b.trip_id=a.trip_id AND b.stop_sequence>a.stop_sequence
         JOIN trips t ON t.trip_id=a.trip_id JOIN routes r ON r.route_id=t.route_id JOIN stops fs ON fs.stop_id=a.stop_id JOIN stops xs ON xs.stop_id=b.stop_id
-        WHERE a.stop_id IN ({origin_marks}) AND a.departure_sec>=? AND a.departure_sec<=? {service_clause}
+        WHERE a.stop_id IN ({origin_marks}) AND a.departure_sec>=? AND a.departure_sec<=? {service_clause}{exclude_clause}
         AND b.arrival_sec>a.departure_sec AND b.arrival_sec<=?
         AND b.stop_id IN (SELECT rs.stop_id FROM route_stops rs WHERE rs.route_id IN ({dest_route_marks}))
         ORDER BY b.arrival_sec LIMIT 1200'''
-    first_args=[*origin_ids,target_sec,target_sec+3600,*service_args,target_sec+3*3600,*dest_routes]
+    first_args=[*origin_ids,target_sec,target_sec+3600,*service_args,*excluded_routes,target_sec+3*3600,*dest_routes]
     first_rows=con.execute(first_sql,first_args).fetchall()
     # Keep at most a few plausible board/transfer points to bound the second leg search.
     unique=[];seen=set()
@@ -296,8 +314,8 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
             JOIN trips t ON t.trip_id=a.trip_id JOIN routes r ON r.route_id=t.route_id
             JOIN stops fs ON fs.stop_id=a.stop_id JOIN stops ts ON ts.stop_id=b.stop_id
             WHERE a.stop_id=? AND b.stop_id IN ({second_marks}) AND a.departure_sec>=? AND a.departure_sec<=?
-            AND t.route_id IN ({dest_route_marks}) AND t.route_id<>? {service_clause} ORDER BY b.arrival_sec LIMIT 4'''
-        second_args=[first['transfer_id'],*destination_ids,first['transfer_arrival']+300,first['transfer_arrival']+7200,*dest_routes,first['route_id'],*service_args]
+            AND t.route_id IN ({dest_route_marks}) AND t.route_id<>? {exclude_clause} {service_clause} ORDER BY b.arrival_sec LIMIT 4'''
+        second_args=[first['transfer_id'],*destination_ids,first['transfer_arrival']+300,first['transfer_arrival']+7200,*dest_routes,first['route_id'],*excluded_routes,*service_args]
         for second in con.execute(second_sql,second_args).fetchall():
             total=second['arrival_sec']-first['departure_sec']
             if total<=0 or total>5*3600: continue
@@ -325,6 +343,8 @@ _motion_state = {}
 _motion_lock = threading.Lock()
 _stop_grid = None
 _stop_grid_lock = threading.Lock()
+_network_cache = None
+_network_cache_lock = threading.Lock()
 
 
 def stops_near(lat, lon, radius_m=35):
@@ -724,8 +744,25 @@ def stops(q: str = ''):
     return {'stops': matches[:20], 'locations': []}
 
 
+@app.get('/assistant/parse')
+def assistant_parse(q: str = '', from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'):
+    parsed = parse_request(q, from_ or 'Kashmere Gate', to or 'Connaught Place', time)
+    con = gtfs_connection()
+    if con:
+        if parsed['origin']:
+            matches = stop_matches(con, parsed['origin'], 1)
+            if matches:
+                parsed['origin'] = matches[0]['name']
+        if parsed['destination']:
+            matches = stop_matches(con, parsed['destination'], 1)
+            if matches:
+                parsed['destination'] = matches[0]['name']
+        con.close()
+    return {'request': q, **parsed}
+
+
 @app.get('/plan')
-def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), comfort: int = 50, friendly: bool = False, special: bool = False, travel_profile: str = Query('standard', pattern='^(standard|comfort|family|older_adult|wheelchair|women_safety)$')):
+def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30', date_: str = Query('', alias='date'), comfort: int = 50, friendly: bool = False, special: bool = False, travel_profile: str = Query('standard', pattern='^(standard|comfort|family|older_adult|wheelchair|women_safety)$'), max_transfers: int = Query(-1, ge=-1, le=1), arrive_by: str = ''):
     try:
         hour = int(time.split(':')[0])
     except (ValueError, IndexError):
@@ -748,6 +785,15 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
         destination_ids, destination_stops = stop_lookup(con, to or 'Connaught Place')
         services = active_services(con, chosen)
         itinerary_rows = find_itineraries(con, origin_ids, destination_ids, target_sec, services)
+        if max_transfers >= 0:
+            itinerary_rows = [itinerary for itinerary in itinerary_rows if itinerary['transfers'] <= max_transfers]
+        if arrive_by:
+            try:
+                by_hour, by_minute = (int(x) for x in arrive_by.split(':')[:2])
+                deadline_sec = by_hour*3600+by_minute*60
+                itinerary_rows = [itinerary for itinerary in itinerary_rows if int(itinerary['arrival_sec']) <= deadline_sec]
+            except (ValueError, AttributeError):
+                pass
         for itinerary in itinerary_rows:
             itinerary['wheelchair_accessibility'] = itinerary_wheelchair_access(con, itinerary)
         if travel_profile == 'wheelchair':
@@ -783,6 +829,7 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 'crowd_score':score if profile else None,'crowd_label':label(score) if profile else {'level':'unknown','en':'No ticket profile','hi':'टिकट डेटा नहीं'},
                 'confidence':profile['confidence'] if profile else 0,'ticket_records':profile['ticket_records'] if profile else 0,
                 'profile_hour':profile['hour'] if profile else None,'geometry':geometry,
+                'stops':leg_stop_points(con,raw['trip_id'],raw.get('from_seq'),raw.get('to_seq')),
                 'historical_speed_kmh':round(gps_profile['median_speed_mps'] * 3.6, 1) if gps_profile else None,
                 'historical_speed_observations':gps_profile['observations'] if gps_profile else 0,
                 'historical_speed_hour':gps_profile.get('hour', hour) if gps_profile else None,
@@ -862,6 +909,7 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
         'relative_crowding_notice': 'Crowd scores rank October ticket activity matched to GTFS route names. Tickets cover a sample and are not passenger counts.',
         'options': rows, 'leave_tip': {'time': tip_time, 'text': tip_text, 'synthetic': False},
         'nearby_stop': None,
+        'constraints': {'max_transfers': max_transfers, 'arrive_by': arrive_by or None},
         'profile_notice': profile_notice,
         'accessibility': coverage,
         'special_day': special_notice,
@@ -985,6 +1033,238 @@ def live(id: str):
         'note': 'Fresh live vehicle positions from the authorized Delhi GTFS-Realtime feed.',
         'synthetic': False,
     }
+
+
+def build_network_payload(con):
+    """Create a simplified, cacheable map of every route shape in static GTFS."""
+    global _network_cache
+    if _network_cache is not None:
+        return _network_cache
+    with _network_cache_lock:
+        if _network_cache is not None:
+            return _network_cache
+        route_rows = con.execute('''SELECT r.route_id,COALESCE(r.short_name,'') short_name,
+            COALESCE(r.long_name,'') long_name,COUNT(DISTINCT rs.stop_id) stop_count
+            FROM routes r LEFT JOIN route_stops rs ON rs.route_id=r.route_id
+            GROUP BY r.route_id ORDER BY r.short_name,r.route_id''').fetchall()
+        routes = {row['route_id']: {'route_id': row['route_id'], 'short_name': row['short_name'],
+                    'long_name': row['long_name'], 'stop_count': int(row['stop_count'] or 0), 'shapes': []}
+                  for row in route_rows}
+        shape_rows = con.execute('''SELECT DISTINCT t.route_id,t.shape_id FROM trips t
+            WHERE t.shape_id IS NOT NULL AND t.shape_id<>'' ORDER BY t.route_id,t.shape_id''').fetchall()
+        shape_count = 0
+        for row in shape_rows:
+            route = routes.get(row['route_id'])
+            if route is None:
+                continue
+            points = [(float(p['lat']), float(p['lon'])) for p in con.execute(
+                'SELECT lat,lon FROM shapes WHERE shape_id=? ORDER BY point_sequence', (row['shape_id'],))]
+            if len(points) < 2:
+                continue
+            step = max(1, (len(points) - 1) // 60)
+            simplified = points[::step]
+            if simplified[-1] != points[-1]:
+                simplified.append(points[-1])
+            route['shapes'].append([[lat, lon] for lat, lon in simplified])
+            shape_count += 1
+        _network_cache = {'routes': list(routes.values()), 'route_count': len(routes),
+                          'stop_count': con.execute('SELECT COUNT(*) FROM stops').fetchone()[0],
+                          'shape_count': shape_count, 'source': 'Static Delhi bus GTFS',
+                          'note': 'One simplified line per direction/shape. This is the published schedule network, not a live service map.'}
+        return _network_cache
+
+
+def connected_routes(con, route_id, limit=40):
+    return [dict(row) for row in con.execute('''SELECT other.route_id,
+        COALESCE(r.short_name,'') short_name,COALESCE(r.long_name,'') long_name,
+        COUNT(DISTINCT own.stop_id) shared_stops
+        FROM route_stops own JOIN route_stops other ON other.stop_id=own.stop_id AND other.route_id<>own.route_id
+        JOIN routes r ON r.route_id=other.route_id WHERE own.route_id=?
+        GROUP BY other.route_id ORDER BY shared_stops DESC,r.short_name LIMIT ?''', (route_id,limit)).fetchall()]
+
+
+def route_schedule_metrics(con, route_id, hour, day_type):
+    day_expr = "(saturday=1 OR sunday=1)" if day_type == 'weekend' else "(monday=1 OR tuesday=1 OR wednesday=1 OR thursday=1 OR friday=1)"
+    service_ids = [r[0] for r in con.execute(f'SELECT service_id FROM calendar WHERE {day_expr}').fetchall()]
+    service_clause = f" AND t.service_id IN ({','.join('?' for _ in service_ids)})" if service_ids else ''
+    service_args = service_ids
+    trip_rows = con.execute(f'''SELECT st.trip_id,MIN(st.departure_sec) start_sec,
+        MAX(st.arrival_sec) end_sec,COUNT(DISTINCT st.stop_id) stop_count
+        FROM trips t JOIN stop_times st ON st.trip_id=t.trip_id
+        WHERE t.route_id=? {service_clause} GROUP BY st.trip_id''', [route_id,*service_args]).fetchall()
+    target = int(hour) * 3600
+    nearby = [r for r in trip_rows if r['start_sec'] is not None and
+              target-3600 <= int(r['start_sec']) <= target+7200 and r['end_sec'] is not None and int(r['end_sec'])>int(r['start_sec'])]
+    selected = nearby or [r for r in trip_rows if r['start_sec'] is not None and r['end_sec'] is not None and int(r['end_sec'])>int(r['start_sec'])]
+    durations = sorted((int(r['end_sec'])-int(r['start_sec']))/60 for r in selected)
+    stop_counts = sorted(int(r['stop_count']) for r in selected)
+    median = lambda values: (values[len(values)//2] if values else None)
+    dep_rows = con.execute(f'''SELECT st.stop_id start_stop,st.departure_sec
+        FROM stop_times st JOIN trips t ON t.trip_id=st.trip_id
+        WHERE t.route_id=? {service_clause}
+        AND st.stop_sequence=(SELECT MIN(first.stop_sequence) FROM stop_times first WHERE first.trip_id=st.trip_id)
+        AND st.departure_sec BETWEEN ? AND ? ORDER BY st.stop_id,st.departure_sec''',
+        [route_id,*service_args,max(0,target-3600),target+4*3600]).fetchall()
+    by_start = {}
+    for row in dep_rows:
+        by_start.setdefault(row['start_stop'], []).append(int(row['departure_sec']))
+    gaps = sorted((b-a)/60 for departures in by_start.values() for a,b in zip(departures,departures[1:]) if b>a)
+    if not gaps:
+        all_day_rows = con.execute(f'''SELECT st.stop_id start_stop,st.departure_sec
+            FROM stop_times st JOIN trips t ON t.trip_id=st.trip_id
+            WHERE t.route_id=? {service_clause}
+            AND st.stop_sequence=(SELECT MIN(first.stop_sequence) FROM stop_times first WHERE first.trip_id=st.trip_id)
+            AND st.departure_sec BETWEEN 0 AND 172800 ORDER BY st.stop_id,st.departure_sec''',
+            [route_id,*service_args]).fetchall()
+        all_day = {}
+        for row in all_day_rows:
+            all_day.setdefault(row['start_stop'], []).append(int(row['departure_sec']))
+        gaps = sorted((b-a)/60 for departures in all_day.values() for a,b in zip(departures,departures[1:]) if b>a)
+    headway = median(gaps)
+    route = con.execute('SELECT COALESCE(short_name,route_id) route_name FROM routes WHERE route_id=?', (route_id,)).fetchone()
+    route_name = route['route_name'] if route else route_id
+    profile = profile_for(route_name, int(hour), day_type)
+    score = int(profile['score']) if profile else 50
+    stop_count = int(median(stop_counts) or 0)
+    scheduled = median(durations)
+    gps = gps_profile_for(route_id, int(hour), day_type)
+    distance = 0.0
+    for shape in con.execute('''SELECT DISTINCT shape_id FROM trips WHERE route_id=? AND shape_id IS NOT NULL LIMIT 1''', (route_id,)):
+        geometry = [[r['lat'],r['lon']] for r in con.execute('SELECT lat,lon FROM shapes WHERE shape_id=? ORDER BY point_sequence', (shape[0],))]
+        distance = geometry_distance_km(geometry) if len(geometry)>1 else 0.0
+    gps_minutes = (distance/(gps['median_speed_mps']*3.6)*60
+                   if gps and gps['median_speed_mps']>0 and distance>0 else None)
+    in_vehicle = float(gps_minutes if gps_minutes is not None else scheduled or 0)
+    return {'route_name':route_name,'scheduled_trip_min':round(float(scheduled),1) if scheduled is not None else None,
+            'historical_speed_trip_min':round(float(gps_minutes),1) if gps_minutes is not None else None,
+            'base_in_vehicle_min':round(in_vehicle,1), 'headway_min':round(float(headway),1) if headway is not None else None,
+            'average_wait_min':round(float(headway)/2,1) if headway is not None else 0.0,
+            'trip_stops':stop_count,'crowd_score':score,'crowd_ticket_records':int(profile['ticket_records']) if profile else 0,
+            'duration_source':'historical GPS speed and route shape' if gps_minutes is not None else ('GTFS scheduled trip median' if scheduled is not None else 'no route timetable sample')}
+
+
+@app.get('/network')
+def bus_network():
+    con = gtfs_connection()
+    if not con:
+        return {'available':False,'routes':[],'note':'Static bus GTFS is not indexed.'}
+    try:
+        payload = build_network_payload(con)
+        return {'available':True,**payload}
+    finally:
+        con.close()
+
+
+@app.get('/network/simulate')
+def simulate_network(scenario: str = Query('traffic', pattern='^(traffic|unavailable|demand|extra_buses)$'),
+                     route_id: str = '', hour: int = Query(8, ge=0, le=23),
+                     time: str = '08:30',
+                     day_type: str = Query('weekday', pattern='^(weekday|weekend)$'),
+                     slowdown_pct: int = Query(30, ge=0, le=80),
+                     demand_increase_pct: int = Query(30, ge=0, le=200),
+                     dwell_min_per_10pct: float = Query(0.5, ge=0, le=10),
+                     extra_buses: int = Query(2, ge=1, le=50),
+                     connection_delay_pct: int = Query(50, ge=0, le=100),
+                     from_stop: str = '', to_stop: str = '', date_: str = Query('', alias='date')):
+    con = gtfs_connection()
+    if not con:
+        return {'available':False,'note':'Static bus GTFS is not indexed.'}
+    try:
+        route = con.execute('SELECT route_id,COALESCE(short_name,route_id) route_name FROM routes WHERE route_id=?', (route_id,)).fetchone()
+        if not route:
+            return {'available':False,'note':'Choose a route from the indexed GTFS network.'}
+        route_id, route_name = route['route_id'], route['route_name']
+        metrics = route_schedule_metrics(con, route_id, hour, day_type)
+        connections = connected_routes(con, route_id)
+        delay = 0.0
+        base_in_vehicle = metrics['base_in_vehicle_min']
+        base_wait = metrics['average_wait_min']
+        before = base_in_vehicle + base_wait
+        after = before
+        assumptions = [f"Baseline uses {metrics['duration_source']} for route {route_name} near {int(hour):02d}:00 {day_type}."]
+        journey_comparison = None
+        estimated_crowd = metrics['crowd_score']
+        if scenario == 'traffic':
+            fraction = min(0.8, max(0, int(slowdown_pct))/100)
+            after = (base_in_vehicle/(1-fraction) if fraction < 1 else base_in_vehicle) + base_wait
+            delay = after-before
+            assumptions.append(f'The selected route corridor is assumed to run {int(slowdown_pct)}% slower; no road-level traffic feed is used.')
+        elif scenario == 'demand':
+            increase = int(demand_increase_pct)
+            delay = (increase/10)*float(dwell_min_per_10pct)
+            after = before+delay
+            estimated_crowd = min(100, round(metrics['crowd_score']*(1+increase/100)))
+            assumptions.append(f'Demand rises {increase}%; the manually set dwell assumption adds {float(dwell_min_per_10pct):g} minute per 10% demand increase to one full route trip.')
+        elif scenario == 'extra_buses':
+            headway = metrics['headway_min']
+            if headway:
+                active_fleet = max(1, round((2*base_in_vehicle)/headway))
+                new_headway = headway*active_fleet/(active_fleet+int(extra_buses))
+                after = base_in_vehicle+new_headway/2
+                delay = after-before
+                assumptions.append(f'{int(extra_buses)} buses are added to an estimated {active_fleet}-bus route fleet and spaced evenly; scheduled in-vehicle time stays the same.')
+            else:
+                after = before
+                assumptions.append('GTFS did not provide enough departures to estimate headway; added buses have no quantified wait-time effect.')
+        else:
+            before = None
+            after = None
+            delay = None
+            if from_stop.strip() and to_stop.strip():
+                try:
+                    chosen = date.fromisoformat(date_) if date_ else date.today()
+                except ValueError:
+                    chosen = date.today()
+                services = active_services(con, chosen)
+                origin_ids, _ = stop_lookup(con, from_stop)
+                destination_ids, _ = stop_lookup(con, to_stop)
+                try:
+                    hh, mm = (int(x) for x in time.split(':')[:2])
+                    target_sec = hh*3600+mm*60
+                except ValueError:
+                    target_sec = 8*3600+30*60
+                baseline = find_itineraries(con, origin_ids, destination_ids, target_sec, services)
+                rerouted = find_itineraries(con, origin_ids, destination_ids, target_sec, services, [route_id])
+                def best_trip(rows):
+                    if not rows: return None
+                    row=min(rows,key=lambda x:(x['arrival_sec']-x['departure_sec'],x['transfers']))
+                    return {'minutes':round((row['arrival_sec']-row['departure_sec'])/60),
+                            'routes':[str(x.get('short_name') or x.get('route_id')) for x in row['legs']],
+                            'transfers':row['transfers']}
+                before_trip, after_trip = best_trip(baseline), best_trip(rerouted)
+                route_was_used = bool(before_trip and route_id in {leg['route_id'] for itinerary in baseline for leg in itinerary['legs']})
+                if before_trip:
+                    before=before_trip['minutes']
+                if after_trip:
+                    after=after_trip['minutes']
+                    delay=after-before if before_trip else None
+                journey_comparison={'from':from_stop,'to':to_stop,'baseline':before_trip,'after_disruption':after_trip,
+                                    'selected_route_used_by_baseline':route_was_used}
+                if not before_trip:
+                    assumptions.append('No baseline scheduled journey was found for the selected stop pair and date.')
+                elif not after_trip:
+                    assumptions.append('No journey remains in the indexed schedule after removing this route.')
+                else:
+                    assumptions.append('Journey times compare the fastest indexed timetable itinerary before and after excluding the selected route.')
+            else:
+                journey_comparison={'from':None,'to':None,'baseline':None,'after_disruption':None}
+                assumptions.append('Choose an origin and destination in the planner first to calculate a scheduled journey-time change.')
+            after = after if journey_comparison.get('after_disruption') else None
+        propagated = round(max(0,delay)*int(connection_delay_pct)/100,1) if delay is not None and delay>0 else 0.0
+        connected = [{**row,'estimated_connection_delay_min':propagated} for row in connections]
+        return {'available':True,'scenario':scenario,'route_id':route_id,'route_name':route_name,
+                'baseline_minutes':round(before,1) if before is not None else None,
+                'estimated_minutes':round(after,1) if after is not None else None,
+                'change_minutes':round(delay,1) if delay is not None else None,
+                'baseline_in_vehicle_min':round(base_in_vehicle,1),'baseline_wait_min':round(base_wait,1),
+                'crowd_score':metrics['crowd_score'],'estimated_crowd_score':estimated_crowd,
+                'crowd_ticket_records':metrics['crowd_ticket_records'],
+                'headway_min':metrics['headway_min'],'trip_stops':metrics['trip_stops'],
+                'connections':connected,'connected_route_count':len(connections),
+                'journey_comparison':journey_comparison,'assumptions':assumptions,
+                'connection_assumption':f'Connected-route delay is a stress-test value: {int(connection_delay_pct)}% of the scenario delay at shared-stop transfers, not a predicted vehicle delay.'}
+    finally:
+        con.close()
 
 
 @app.get('/insights')

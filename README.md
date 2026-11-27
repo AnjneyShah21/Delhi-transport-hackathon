@@ -55,7 +55,30 @@ is open. It is not a live crowd alert or a background push notification.
 
 Useful endpoints: `/healthz`, `/data/status`, `/stops?q=...`, `/crowd/trends`,
 `/crowd/route/{route}`, `/gps/route/{route}?hour=8&day_type=weekday`,
-`/accuracy`, and `/insights`.
+`/accuracy`, `/insights`, `/network`, `/network/simulate`, and
+`/assistant/parse`.
+
+## Digital twin, conversational planning, and Journey Guardian
+
+The Insights view draws all indexed GTFS route shapes and lets a passenger run
+what-if tests for route-corridor slowdown, a route outage, increased demand,
+and additional buses. These are schedule-based scenarios with visible user
+assumptions; they do not model road traffic, onboard loads, dispatch, or actual
+service changes. Shared-stop propagation is a transfer stress test, not a
+prediction for connected vehicles.
+
+The journey assistant uses a small local rule-based parser to turn common
+phrases into origin/destination, time, transfer-count, and crowd preferences.
+It does not call a remote or trained AI model. Walking minimization currently
+uses a direct-route preference because no pedestrian routing graph is
+connected.
+
+Journey Guardian is an opt-in, while-open-page browser feature. It checks the
+device location locally for approaching destination and possible missed
+transfer stops; route-wide live-feed hints can flag a possible transfer risk.
+It cannot confirm which bus the passenger boarded, and revised options are
+scheduled alternatives. See [the feature notes](docs/network-simulation.md)
+for behavior, thresholds, data sources, and limitations.
 
 ## Data and assumptions
 
