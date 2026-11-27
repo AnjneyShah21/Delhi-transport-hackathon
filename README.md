@@ -31,8 +31,8 @@ be read as passenger counts. The planner uses GTFS stop names, service
 calendars, scheduled trips, transfers, and route shapes. Scheduled durations do
 not account for traffic or delays. The `/live/route/{route}` endpoint decodes
 authorized Delhi OTD GTFS-RT positions when `OTD_API_KEY` is set. Copy
-`.env.example` to `.env`, add the key, and restart the API. `.env` is ignored by
-Git. GPS history is downloaded separately for delay and travel-time modelling;
+`.env.example` to `.env` and add the key. `.env` is ignored by Git. GPS history
+is downloaded separately for delay and travel-time modelling;
 metro routing and AFC crowd estimates still need their respective feeds.
 Route details also show sampled ticket origin–destination pairs for the selected
 bus route and time band. These describe ticket activity, not onboard occupancy
