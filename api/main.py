@@ -11,9 +11,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title='Delhi Ki Public API', description='Delhi Ki Public — Know the crowd before you board. Crowd scores are relative estimates, not passenger counts.', version='0.3.0')
 ROOT = Path(__file__).resolve().parent.parent
+app.mount('/vendor/leaflet', StaticFiles(directory=ROOT / 'frontend' / 'vendor' / 'leaflet'), name='leaflet')
 PROFILE_FILE = ROOT / 'data' / 'processed' / 'crowd_profiles.json'
 GTFS_FILE = ROOT / 'data' / 'processed' / 'gtfs.sqlite'
 GPS_PROFILE_FILE = ROOT / 'data' / 'processed' / 'gps_speed_profiles.json'

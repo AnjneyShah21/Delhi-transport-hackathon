@@ -4,6 +4,10 @@
 
 Delhi Ki Public is a crowdedness-aware Delhi bus journey planner for the Transport Stack Hackathon 2026. Crowd estimates are **relative**: ticketing covers only about 3–4% of real bus tickets, so scores compare route, segment, time band and day type; they are not passenger counts.
 
+## Map
+
+The planner uses Leaflet with real OpenStreetMap street tiles, route shapes, stop markers, and live bus markers. Leaflet assets are vendored under `frontend/vendor/leaflet`; map tiles are loaded online and attributed on the map. The default OpenStreetMap tile service has a usage policy and is suitable for light interactive use; for a public production deployment with regular traffic, configure a dedicated tile provider or host tiles rather than relying on community tiles. See the [Leaflet quick start](https://leafletjs.com/examples/quick-start/) and [OpenStreetMap tile policy](https://operations.osmfoundation.org/policies/tiles/).
+
 ## Quick start
 
 ```bash
