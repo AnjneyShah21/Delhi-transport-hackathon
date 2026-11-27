@@ -32,8 +32,8 @@ The feed URLs and API keys shown are examples, not working provider URLs or keys
 ## What is currently safe to claim
 
 - Static bus schedules and routes are usable for journey options.
-- Authorized OTD vehicle positions can be shown on the map. A position feed alone is not a reliable delay signal; the currently observed positions do not consistently match the supplied static trips and do not provide usable movement speed.
+- Authorized Transport Stack vehicle positions can be shown on the map. Fresh route-matched speed and position samples now flag a possible traffic hold after a bus remains nearly stationary for 90 seconds away from a mapped GTFS stop. This is a heuristic, not a confirmed schedule delay; the app suggests comparing its other scheduled options.
 - October ticket estimates measure relative activity in the available ticket sample, not bus occupancy or seat availability.
 - Comfort/family/older-adult preferences favor fewer transfers and lower sampled crowd. They do not yet minimize actual walking or assess safety.
 - Wheelchair routes are withheld until trip and stop accessibility is explicitly known. The currently supplied GTFS has no usable wheelchair flags or pathways.
-- No live delay/disruption alerts or safety ranking are claimed until their source feeds are supplied and validated.
+- Schedule-based significant-delay and disruption alerts are not available until trip-matched ETAs or GTFS-Realtime TripUpdates and ServiceAlerts are supplied and validated. No safety ranking is claimed without verified safety data.

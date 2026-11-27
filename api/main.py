@@ -290,6 +290,73 @@ _live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None, 's
 _live_lock = threading.Lock()
 _eta_cache = {}
 _eta_lock = threading.Lock()
+_motion_state = {}
+_motion_lock = threading.Lock()
+_stop_grid = None
+_stop_grid_lock = threading.Lock()
+
+
+def stops_near(lat, lon, radius_m=35):
+    """Check a small spatial grid so a planned stop dwell is not called traffic."""
+    global _stop_grid
+    if _stop_grid is None:
+        with _stop_grid_lock:
+            if _stop_grid is None:
+                grid = {}
+                con = gtfs_connection()
+                if con:
+                    for row in con.execute('SELECT lat,lon FROM stops WHERE lat IS NOT NULL AND lon IS NOT NULL'):
+                        cell = (int(float(row['lat']) * 200), int(float(row['lon']) * 200))
+                        grid.setdefault(cell, []).append((float(row['lat']), float(row['lon'])))
+                    con.close()
+                _stop_grid = grid
+    lat_cell, lon_cell = int(lat * 200), int(lon * 200)
+    for dlat in (-1, 0, 1):
+        for dlon in (-1, 0, 1):
+            for stop_lat, stop_lon in _stop_grid.get((lat_cell + dlat, lon_cell + dlon), ()):
+                if geometry_distance_km([[lat, lon], [stop_lat, stop_lon]]) * 1000 <= radius_m:
+                    return True
+    return False
+
+
+def annotate_live_motion(buses, observed_at):
+    """Flag repeated slow, stationary fresh positions away from mapped bus stops."""
+    now = time.monotonic()
+    with _motion_lock:
+        for bus in buses:
+            bus['traffic_status'] = 'unknown'
+            if not bus.get('is_fresh'):
+                continue
+            speed = bus.get('speed_mps')
+            vehicle_id = str(bus.get('vehicle_id') or '')
+            if not vehicle_id or speed is None:
+                continue
+            lat, lon = float(bus['lat']), float(bus['lon'])
+            previous = _motion_state.get(vehicle_id)
+            moved_m = (geometry_distance_km([[lat, lon], [previous['lat'], previous['lon']]]) * 1000
+                       if previous else 9999)
+            if speed <= 0.8 and not stops_near(lat, lon):
+                if previous and now - previous['last_seen'] <= 45 and moved_m <= 25:
+                    slow_since = previous['slow_since']
+                    samples = previous['samples'] + 1
+                else:
+                    slow_since, samples = now, 1
+                held_seconds = int(now - slow_since)
+                bus['traffic_status'] = 'possible_hold' if held_seconds >= 90 and samples >= 4 else 'slow'
+                bus['held_seconds'] = held_seconds
+                _motion_state[vehicle_id] = {
+                    'lat': lat, 'lon': lon, 'last_seen': now,
+                    'slow_since': slow_since, 'samples': samples,
+                }
+            else:
+                bus['traffic_status'] = 'moving' if speed > 0.8 else 'near_stop'
+                _motion_state[vehicle_id] = {
+                    'lat': lat, 'lon': lon, 'last_seen': now,
+                    'slow_since': now, 'samples': 0,
+                }
+        for vehicle_id, state in list(_motion_state.items()):
+            if now - state['last_seen'] > 300:
+                del _motion_state[vehicle_id]
 
 
 def local_setting(name):
@@ -313,7 +380,7 @@ def live_vehicle_positions():
     if dts_key:
         query = urllib.parse.urlencode({'agency': 'delhi-buses', 'category': 'realtime_gtfs',
                                         'filename': 'VehiclePositions.pb'})
-        feed_url = f'https://delhi.transportstack.in/api/dataset/otd/get-file?{query}'
+        feed_url = f'https://dts-backend.transportstack.in/api/dataset/otd/get-file?{query}'
         feed_headers = {'x-api-key': dts_key, 'User-Agent': 'DelhiKiPublic/0.4 (GTFS-Realtime consumer)'}
         feed_source = 'Delhi Transport Stack GTFS-Realtime'
     else:
@@ -346,6 +413,7 @@ def live_vehicle_positions():
                 trip_routes = {r['trip_id']: r['route_id'] for r in con.execute('SELECT trip_id,route_id FROM trips')}
                 con.close()
 
+            timestamp = int(feed.header.timestamp) if feed.header.HasField('timestamp') else int(time.time())
             buses = []
             for entity in feed.entity:
                 if not entity.HasField('vehicle'):
@@ -359,6 +427,8 @@ def live_vehicle_positions():
                 trip_id = vehicle.trip.trip_id if vehicle.HasField('trip') else ''
                 route_id = vehicle.trip.route_id if vehicle.HasField('trip') else ''
                 route_id = route_id or trip_routes.get(trip_id, '')
+                vehicle_timestamp = int(vehicle.timestamp) if vehicle.HasField('timestamp') else None
+                age_seconds = timestamp - vehicle_timestamp if vehicle_timestamp is not None else None
                 buses.append({
                     'vehicle_id': vehicle.vehicle.id or entity.id,
                     'label': vehicle.vehicle.label or '',
@@ -369,9 +439,11 @@ def live_vehicle_positions():
                     'lon': position.longitude,
                     'bearing': position.bearing if position.HasField('bearing') else None,
                     'speed_mps': position.speed if position.HasField('speed') else None,
-                    'timestamp': int(vehicle.timestamp) if vehicle.HasField('timestamp') else None,
+                    'timestamp': vehicle_timestamp,
+                    'age_seconds': age_seconds,
+                    'is_fresh': age_seconds is not None and -180 <= age_seconds <= 120,
                 })
-            timestamp = int(feed.header.timestamp) if feed.header.HasField('timestamp') else None
+            annotate_live_motion(buses, timestamp)
             _live_cache.update(expires=now + 15, timestamp=timestamp, buses=buses,
                                error=None, source=feed_source)
             return {'available': True, 'configured': True, 'source': feed_source,
@@ -510,8 +582,13 @@ def feature_readiness():
             'configured': bool(local_setting('OTD_API_KEY') or local_setting('DTS_GTFSRT_API_KEY')),
             'purpose': 'Map display only; vehicle positions do not establish schedule delay.'
         },
+        'traffic_hold_detection': {
+            'configured': bool(local_setting('DTS_GTFSRT_API_KEY')),
+            'purpose': 'Flags a possible hold after repeated fresh low-speed positions away from a mapped stop; not a confirmed delay.'
+        },
         'delay_alerts': {
-            'available': bool(trip_updates), 'trip_updates_configured': bool(trip_updates),
+            'available': False, 'configured': bool(trip_updates and service_alerts),
+            'trip_updates_configured': bool(trip_updates),
             'service_alerts_configured': bool(service_alerts),
             'purpose': 'Requires current GTFS-Realtime TripUpdates and ServiceAlerts feeds matched to this static GTFS.'
         },
@@ -857,7 +934,9 @@ def live(id: str):
     if not feed['available']:
         return {'route_id': id, **feed, 'synthetic': True}
     requested = id.strip().casefold()
-    buses = [b for b in feed['buses'] if b['route_id'].casefold() == requested or b['route'].casefold().startswith(requested)]
+    route_buses = [b for b in feed['buses'] if b['route_id'].casefold() == requested or b['route'].casefold().startswith(requested)]
+    buses = [b for b in route_buses if b.get('is_fresh')]
+    traffic_holds = [b for b in buses if b.get('traffic_status') == 'possible_hold']
     return {
         'route_id': id,
         'available': True,
@@ -865,7 +944,11 @@ def live(id: str):
         'timestamp': feed['timestamp'],
         'buses': buses,
         'count': len(buses),
-        'note': 'Live vehicle positions from the authorized Delhi OTD GTFS-Realtime feed.',
+        'stale_positions_ignored': len(route_buses) - len(buses),
+        'traffic_holds': traffic_holds,
+        'traffic_notice': 'Possible traffic hold means a fresh bus position stayed nearly stationary below 0.8 m/s for at least 90 seconds away from a mapped GTFS stop. It is not a confirmed schedule delay.',
+        'source': feed.get('source'),
+        'note': 'Fresh live vehicle positions from the authorized Delhi GTFS-Realtime feed.',
         'synthetic': False,
     }
 
