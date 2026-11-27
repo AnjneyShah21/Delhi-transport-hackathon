@@ -519,7 +519,7 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                         f"({suggested['score']}/100) than at {hour}:00 ({current['score']}/100). " +
                         'Crowd data is hourly; check the scheduled buses after applying the time.')
     anomalies = (VALIDATION or {}).get('daily_ticket_anomalies', [])
-    selected_anomaly = next((x for x in anomalies if x['date'] == str(chosen)), None)
+    selected_anomaly = next((x for x in anomalies if x['date'] == str(chosen)), None) if special else None
     if selected_anomaly:
         direction = 'above' if selected_anomaly['direction'] == 'high' else 'below'
         special_notice = {
