@@ -286,8 +286,10 @@ def find_itineraries(con, origin_ids, destination_ids, target_sec, services):
     return result
 
 
-_live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None}
+_live_cache = {'expires': 0.0, 'timestamp': None, 'buses': [], 'error': None, 'source': None}
 _live_lock = threading.Lock()
+_eta_cache = {}
+_eta_lock = threading.Lock()
 
 
 def local_setting(name):
@@ -306,32 +308,31 @@ def local_setting(name):
 
 def live_vehicle_positions():
     """Fetch and decode OTD's authorized GTFS-Realtime vehicle feed."""
-    api_key = os.getenv('OTD_API_KEY', '').strip()
-    if not api_key:
-        env_file = ROOT / '.env'
-        try:
-            for line in env_file.read_text(encoding='utf-8').splitlines():
-                key, separator, value = line.partition('=')
-                if separator and key.strip() == 'OTD_API_KEY':
-                    api_key = value.strip().strip('"\'')
-                    break
-        except OSError:
-            pass
-    if not api_key:
-        return {'available': False, 'configured': False, 'buses': [], 'note': 'Set OTD_API_KEY to enable live bus positions.'}
+    dts_key = local_setting('DTS_GTFSRT_API_KEY')
+    api_key = local_setting('OTD_API_KEY')
+    if dts_key:
+        query = urllib.parse.urlencode({'agency': 'delhi-buses', 'category': 'realtime_gtfs',
+                                        'filename': 'VehiclePositions.pb'})
+        feed_url = f'https://delhi.transportstack.in/api/dataset/otd/get-file?{query}'
+        feed_headers = {'x-api-key': dts_key, 'User-Agent': 'DelhiKiPublic/0.4 (GTFS-Realtime consumer)'}
+        feed_source = 'Delhi Transport Stack GTFS-Realtime'
+    else:
+        query = urllib.parse.urlencode({'key': api_key})
+        feed_url = f'https://otd.delhi.gov.in/api/realtime/VehiclePositions.pb?{query}'
+        feed_headers = {'User-Agent': 'DelhiKiPublic/0.4 (GTFS-Realtime consumer)'}
+        feed_source = 'Delhi OTD GTFS-Realtime'
+    if not api_key and not dts_key:
+        return {'available': False, 'configured': False, 'buses': [], 'note': 'Configure an authorized OTD or Transport Stack GTFS-Realtime API key.'}
     now = time.monotonic()
     with _live_lock:
         if _live_cache['expires'] > now:
             if _live_cache['error']:
                 return {'available': False, 'configured': True, 'buses': [], 'note': _live_cache['error']}
-            return {'available': True, 'configured': True, 'timestamp': _live_cache['timestamp'], 'buses': _live_cache['buses']}
+            return {'available': True, 'configured': True, 'source': _live_cache['source'],
+                    'timestamp': _live_cache['timestamp'], 'buses': _live_cache['buses']}
         try:
             from google.transit import gtfs_realtime_pb2
-            query = urllib.parse.urlencode({'key': api_key})
-            request = urllib.request.Request(
-                f'https://otd.delhi.gov.in/api/realtime/VehiclePositions.pb?{query}',
-                headers={'User-Agent': 'DelhiKiPublic/0.3 (GTFS-Realtime consumer)'},
-            )
+            request = urllib.request.Request(feed_url, headers=feed_headers)
             with urllib.request.urlopen(request, timeout=12) as response:
                 payload = response.read()
             feed = gtfs_realtime_pb2.FeedMessage()
@@ -371,15 +372,17 @@ def live_vehicle_positions():
                     'timestamp': int(vehicle.timestamp) if vehicle.HasField('timestamp') else None,
                 })
             timestamp = int(feed.header.timestamp) if feed.header.HasField('timestamp') else None
-            _live_cache.update(expires=now + 15, timestamp=timestamp, buses=buses, error=None)
-            return {'available': True, 'configured': True, 'timestamp': timestamp, 'buses': buses}
+            _live_cache.update(expires=now + 15, timestamp=timestamp, buses=buses,
+                               error=None, source=feed_source)
+            return {'available': True, 'configured': True, 'source': feed_source,
+                    'timestamp': timestamp, 'buses': buses}
         except ModuleNotFoundError:
             note = 'Install gtfs-realtime-bindings to decode live positions.'
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
             note = f'Live feed is unavailable ({type(exc).__name__}). Check API access and network.'
         except Exception as exc:
             note = f'Could not decode the live feed ({type(exc).__name__}).'
-        _live_cache.update(expires=now + 10, timestamp=None, buses=[], error=note)
+        _live_cache.update(expires=now + 10, timestamp=None, buses=[], error=note, source=feed_source)
         return {'available': False, 'configured': True, 'buses': [], 'note': note}
 
 
@@ -501,15 +504,20 @@ def feature_readiness():
     trip_updates = local_setting('OTD_TRIP_UPDATES_URL')
     service_alerts = local_setting('OTD_SERVICE_ALERTS_URL')
     pedestrian_key = local_setting('ORS_API_KEY')
+    eta_key = local_setting('DTS_ETA_API_KEY')
     return {
         'live_vehicle_positions': {
-            'configured': bool(local_setting('OTD_API_KEY')),
+            'configured': bool(local_setting('OTD_API_KEY') or local_setting('DTS_GTFSRT_API_KEY')),
             'purpose': 'Map display only; vehicle positions do not establish schedule delay.'
         },
         'delay_alerts': {
             'available': bool(trip_updates), 'trip_updates_configured': bool(trip_updates),
             'service_alerts_configured': bool(service_alerts),
             'purpose': 'Requires current GTFS-Realtime TripUpdates and ServiceAlerts feeds matched to this static GTFS.'
+        },
+        'bus_stop_etas': {
+            'configured': bool(eta_key),
+            'purpose': 'Transport Stack estimates arrivals for buses serving a GTFS stop; this is not a GTFS-RT disruption feed.'
         },
         'accessibility': accessibility,
         'pedestrian_routing': {
@@ -521,6 +529,55 @@ def feature_readiness():
             'purpose': 'No verified, sufficiently complete stop and street safety dataset is connected.'
         }
     }
+
+
+def transportstack_eta(kind, identifier):
+    api_key = local_setting('DTS_ETA_API_KEY')
+    if not api_key:
+        return {'available': False, 'configured': False,
+                'note': 'Transport Stack ETA access requires approval and the API key sent by email.'}
+    if kind == 'stop':
+        endpoint, param = 'stop/etas', 'stop_id'
+    else:
+        endpoint, param = 'bus/etas', 'vehicle_id'
+    cache_key = (kind, str(identifier))
+    now = time.monotonic()
+    with _eta_lock:
+        cached = _eta_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
+        query = urllib.parse.urlencode({param: str(identifier)})
+        request = urllib.request.Request(
+            f'https://dts-backend.transportstack.in/api/serviceset/eta-calculator/{endpoint}?{query}',
+            headers={'x-api-key': api_key, 'Accept': 'application/json',
+                     'User-Agent': 'DelhiKiPublic/0.4'},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+            if not isinstance(payload, dict):
+                raise ValueError('Unexpected ETA response')
+            result = {**payload, 'available': True, 'configured': True,
+                      'source': 'Delhi Transport Stack ETA Calculator'}
+            _eta_cache[cache_key] = (now + 15, result)
+            return result
+        except urllib.error.HTTPError as exc:
+            note = 'ETA access was denied; check approval and the API key.' if exc.code in (401, 403) else f'ETA service returned HTTP {exc.code}.'
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            note = 'Transport Stack ETA service is temporarily unavailable.'
+        result = {'available': False, 'configured': True, 'note': note}
+        _eta_cache[cache_key] = (now + 8, result)
+        return result
+
+
+@app.get('/eta/stop/{stop_id}')
+def stop_etas(stop_id: str):
+    return transportstack_eta('stop', stop_id)
+
+
+@app.get('/eta/bus/{vehicle_id}')
+def bus_eta(vehicle_id: str):
+    return transportstack_eta('bus', vehicle_id)
 
 
 @app.get('/gps/route/{route_id}')
