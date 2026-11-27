@@ -1,6 +1,10 @@
 # Data needed to finish delay and accessibility features
 
-The planner now exposes comfort, family, older-adult, wheelchair, and women-travelling-alone preferences. The first three are transparent schedule/crowd heuristics. Wheelchair journeys are only shown when GTFS explicitly verifies the trip and boarding/alighting stops; unknown values stay unknown. The women-safety choice does not label routes safe without verified evidence. Check `/feature-readiness` and `/accessibility/status` for the current connected-data state.
+The planner now exposes comfort, family, older-adult, wheelchair, and women-travelling-alone preferences. Comfort profiles are transparent schedule/crowd heuristics. The wheelchair profile excludes journeys explicitly marked inaccessible and can show the remaining candidates as unverified; it only labels a journey verified where GTFS explicitly confirms the trip and boarding/alighting stops. The women-safety choice does not label routes safe without verified evidence. Check `/feature-readiness` and `/accessibility/status` for the current connected-data state.
+
+## Public stop evidence already connected
+
+The app includes a local lookup built from the public [BBBike NewDelhi OpenStreetMap extract](https://download3.bbbike.org/osm/bbbike/NewDelhi/NewDelhi.osm.pbf), snapshot `2026-11-21`, licensed under ODbL 1.0. OpenStreetMap contributors are credited in the map; OSM database attribution and share-alike terms apply to this derived database. The lookup matched 2,279 of 6,862 GTFS stops to mapped bus-stop/platform features within 50 metres. It contains wheelchair tags for 230 matched stops, tactile-paving tags for 1,100, and lighting tags for 293. These values are community-mapped, incomplete, and can be stale. The planner displays them as stop-level evidence only; no tag or missing tag verifies the bus, a full route, or personal safety. `/accessibility/status` reports the source, snapshot, radius, and coverage. To rebuild from a newer extract, install optional `osmium` and run `python3 data_pipeline/build_osm_accessibility.py --pbf PATH_TO_EXTRACT`.
 
 ## Request from Delhi Transport Stack
 
@@ -35,5 +39,5 @@ The feed URLs and API keys shown are examples, not working provider URLs or keys
 - Authorized Transport Stack vehicle positions can be shown on the map. Fresh route-matched speed and position samples now flag a possible traffic hold after a bus remains nearly stationary for 90 seconds away from a mapped GTFS stop. This is a heuristic, not a confirmed schedule delay; the app suggests comparing its other scheduled options.
 - October ticket estimates measure relative activity in the available ticket sample, not bus occupancy or seat availability.
 - Comfort/family/older-adult preferences favor fewer transfers and lower sampled crowd. They do not yet minimize actual walking or assess safety.
-- Wheelchair routes are withheld until trip and stop accessibility is explicitly known. The currently supplied GTFS has no usable wheelchair flags or pathways.
+- GTFS-confirmed wheelchair journeys are identified separately. Explicitly inaccessible trips are excluded from the wheelchair profile; other scheduled options may be shown as unverified. Partial OSM stop tags do not certify vehicle or journey accessibility.
 - Schedule-based significant-delay and disruption alerts are not available until trip-matched ETAs or GTFS-Realtime TripUpdates and ServiceAlerts are supplied and validated. No safety ranking is claimed without verified safety data.

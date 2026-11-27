@@ -13,6 +13,7 @@ data/processed/*
 !data/processed/crowd_profiles.json
 !data/processed/gps_speed_profiles.json
 !data/processed/crowd_validation.json
+!data/processed/osm_stop_accessibility.json
 *.parquet
 *.duckdb
 *.db

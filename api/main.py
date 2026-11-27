@@ -16,8 +16,10 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI(title='Delhi Ki Public API', description='Delhi Ki Public — Know the crowd before you board. Crowd scores are relative estimates, not passenger counts.', version='0.3.0')
 ROOT = Path(__file__).resolve().parent.parent
 app.mount('/vendor/leaflet', StaticFiles(directory=ROOT / 'frontend' / 'vendor' / 'leaflet'), name='leaflet')
+app.mount('/assets', StaticFiles(directory=ROOT / 'frontend' / 'assets'), name='assets')
 PROFILE_FILE = ROOT / 'data' / 'processed' / 'crowd_profiles.json'
 GTFS_FILE = ROOT / 'data' / 'processed' / 'gtfs.sqlite'
+OSM_ACCESS_FILE = ROOT / 'data' / 'processed' / 'osm_stop_accessibility.json'
 GPS_PROFILE_FILE = ROOT / 'data' / 'processed' / 'gps_speed_profiles.json'
 VALIDATION_FILE = ROOT / 'data' / 'processed' / 'crowd_validation.json'
 try:
@@ -40,6 +42,22 @@ try:
     VALIDATION = json.loads(VALIDATION_FILE.read_text(encoding='utf-8'))
 except (OSError, json.JSONDecodeError):
     VALIDATION = None
+try:
+    OSM_ACCESS = json.loads(OSM_ACCESS_FILE.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError):
+    OSM_ACCESS = None
+
+
+def osm_stop_access(stop_id):
+    """Return community-mapped OSM evidence without implying full accessibility."""
+    if not OSM_ACCESS:
+        return {'matched': False, 'wheelchair': 'unknown', 'tactile_paving': 'unknown', 'lighting': 'unknown'}
+    row = OSM_ACCESS.get('stops', {}).get(str(stop_id))
+    if not row:
+        return {'matched': False, 'wheelchair': 'unknown', 'tactile_paving': 'unknown', 'lighting': 'unknown'}
+    return {'matched': True, 'distance_m': row.get('distance_m'), 'wheelchair': row.get('wheelchair', 'unknown'),
+            'tactile_paving': row.get('tactile_paving', 'unknown'), 'lighting': row.get('lighting', 'unknown'),
+            'osm_element': row.get('osm_element'), 'tags': row.get('tags', {})}
 
 
 def gps_profile_for(route_id, hour, day_type):
@@ -80,7 +98,7 @@ def gtfs_connection():
 def read_accessibility_coverage(con):
     if not con:
         return {'available': False, 'wheelchair_stop_fields': False, 'wheelchair_trip_fields': False,
-                'pathways_available': False, 'note': 'Static bus GTFS is not indexed.'}
+                'pathways_available': False, 'osm_stop_data': osm_access_coverage(), 'note': 'Static bus GTFS is not indexed.'}
     try:
         stop_stats = con.execute('''SELECT COUNT(*) total,
             SUM(CASE WHEN wheelchair_boarding IN (1,2) THEN 1 ELSE 0 END) known,
@@ -95,7 +113,7 @@ def read_accessibility_coverage(con):
         stair_count = con.execute('SELECT COUNT(*) FROM pathways WHERE pathway_mode=2').fetchone()[0]
     except sqlite3.Error:
         return {'available': False, 'wheelchair_stop_fields': False, 'wheelchair_trip_fields': False,
-                'pathways_available': False, 'note': 'GTFS accessibility fields are not available in this index.'}
+                'pathways_available': False, 'osm_stop_data': osm_access_coverage(), 'note': 'GTFS accessibility fields are not available in this index.'}
     stop_known, trip_known = int(stop_stats['known'] or 0), int(trip_stats['known'] or 0)
     complete = stop_known > 0 and trip_known > 0
     return {
@@ -110,8 +128,21 @@ def read_accessibility_coverage(con):
         'pathways': pathway_count,
         'elevator_pathways': elevator_count,
         'stair_pathways': stair_count,
+        'osm_stop_data': osm_access_coverage(),
         'note': 'Unknown accessibility values are not treated as accessible.' if complete else 'Current feed does not provide enough explicit bus and stop accessibility fields to verify a wheelchair-accessible journey.'
     }
+
+
+def osm_access_coverage():
+    if not OSM_ACCESS:
+        return {'available': False, 'matched_gtfs_stops': 0, 'note': 'No local OSM stop extract indexed.'}
+    return {key: OSM_ACCESS.get(key, 0) for key in (
+        'source', 'source_url', 'license', 'snapshot_date', 'matching_radius_m',
+        'gtfs_stop_count', 'matched_gtfs_stops', 'wheelchair_known_stops',
+        'wheelchair_yes_stops', 'wheelchair_limited_stops', 'wheelchair_no_stops',
+        'tactile_known_stops', 'lighting_known_stops') } | {
+            'available': True,
+            'note': 'Partial community-mapped stop evidence only; missing tags are unknown and this does not verify the bus or whole journey.'}
 
 
 def stop_wheelchair_access(con, stop_id):
@@ -721,7 +752,8 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
             itinerary['wheelchair_accessibility'] = itinerary_wheelchair_access(con, itinerary)
         if travel_profile == 'wheelchair':
             itinerary_rows = [itinerary for itinerary in itinerary_rows
-                              if itinerary['wheelchair_accessibility']['status'] == 'verified_accessible']
+                              if itinerary['wheelchair_accessibility']['status'] != 'not_accessible']
+            itinerary_rows.sort(key=lambda itinerary: itinerary['wheelchair_accessibility']['status'] != 'verified_accessible')
     rows=[]
     for itinerary in itinerary_rows[:6]:
         legs=[]; weighted_score=0; weighted_confidence=0; covered=0; record_total=0; duration_total=0
@@ -757,6 +789,8 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
                 'historical_speed_hour_matched':gps_profile.get('hour_matched', True) if gps_profile else False,
                 'gps_speed_based_duration_min':round(gps_minutes) if gps_minutes is not None else None,
                 'wheelchair_accessibility':wheelchair,
+                'from_stop_osm_accessibility':osm_stop_access(raw['from_id']),
+                'to_stop_osm_accessibility':osm_stop_access(raw['to_id']),
             })
         mean = round(weighted_score / duration_total) if duration_total else 50
         crowd_available = covered == len(legs) and covered > 0
@@ -786,9 +820,9 @@ def plan(from_: str = Query('', alias='from'), to: str = '', time: str = '08:30'
     if travel_profile in ('comfort', 'family', 'older_adult'):
         profile_notice = 'This preference favors fewer transfers and lower sampled crowd. Walking distance and safety are not assessed with the available feeds.'
     elif travel_profile == 'wheelchair':
-        profile_notice = 'Only routes with explicit accessible bus, boarding stops, and destination stops are shown. Unknown data is not treated as accessible.'
+        profile_notice = 'Routes marked not accessible by GTFS are excluded. Other routes are unverified unless GTFS explicitly confirms the bus and both stops; public OpenStreetMap tags are partial stop evidence only.'
         if not coverage['available']:
-            profile_notice = 'Wheelchair-accessible routes cannot be verified because the current bus GTFS lacks complete wheelchair fields. No route is labelled accessible.'
+            profile_notice = 'No wheelchair-accessible journey can be verified from current bus GTFS. Routes without an explicit not-accessible flag may be listed as unverified; OpenStreetMap tags only describe some stops, not buses or the full journey.'
     elif travel_profile == 'women_safety':
         profile_notice = 'Verified safety information for stops and walking paths is not connected. These routes are not ranked as safer.'
     tip_time = None
